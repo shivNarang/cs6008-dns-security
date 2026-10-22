@@ -50,5 +50,7 @@ sh scripts/teardown.sh   # stop + remove
 ## Notes for graders / teammates
 - Needs Docker Engine/Desktop with Compose + Buildx, and the `NET_ADMIN`
   capability (granted in compose). Build needs Internet once; runtime is offline.
-- Not yet tested on *this* checkout's host (no Docker here); configs are
-  statically validated. First run: `sh scripts/deploy.sh && sh scripts/verify.sh`.
+- **Verified** on Colima (Docker 29, Ubuntu 24.04 VM, Apple Silicon): all Phase 1
+  checks pass — example.com and www resolve to 172.16.1.20, the real page is
+  fetched, the direct-to-root query is blocked ("no servers could be reached"),
+  and a core-router capture shows the full resolver→root→tld→domain referral.
