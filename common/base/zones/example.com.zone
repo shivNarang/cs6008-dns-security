@@ -1,0 +1,10 @@
+; example.com. zone served by domain-ns (172.16.3.30)
+$TTL 3600
+example.com.        IN  SOA ns.example.com. admin.example.com. (
+                            2026102201 3600 1800 604800 3600 )
+example.com.        IN  NS  ns.example.com.
+ns.example.com.     IN  A   172.16.3.30
+
+; A records point at the legitimate webserver (client subnet)
+example.com.        IN  A   172.16.1.20
+www.example.com.    IN  A   172.16.1.20

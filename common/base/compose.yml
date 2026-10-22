@@ -1,0 +1,121 @@
+# CS6008 Assignment 2 - Phase 1 base: plain hierarchical DNS, no attacker.
+# Three isolated bridges; the two routers are the only path between subnets (no NAT).
+name: cs6008-dns-phase1
+
+x-node: &node
+  build:
+    context: .
+    dockerfile: Dockerfile
+  cap_add:
+    - NET_ADMIN
+  restart: unless-stopped
+
+services:
+  # ---------------- authoritative subnet (172.16.3.0/24) ----------------
+  root-ns:
+    <<: *node
+    container_name: root-ns
+    hostname: root-ns
+    networks: { auth_net: { ipv4_address: 172.16.3.10 } }
+    environment:
+      STATIC_ROUTES: "172.16.2.0/24 via 172.16.3.3"
+    volumes:
+      - ./configs/root-ns/named.conf:/etc/bind/named.conf:ro
+      - ./zones/root.zone:/etc/bind/zones/root.zone:ro
+    command: ["named","-g","-c","/etc/bind/named.conf"]
+
+  tld-ns:
+    <<: *node
+    container_name: tld-ns
+    hostname: tld-ns
+    networks: { auth_net: { ipv4_address: 172.16.3.20 } }
+    environment:
+      STATIC_ROUTES: "172.16.2.0/24 via 172.16.3.3"
+    volumes:
+      - ./configs/tld-ns/named.conf:/etc/bind/named.conf:ro
+      - ./zones/com.zone:/etc/bind/zones/com.zone:ro
+    command: ["named","-g","-c","/etc/bind/named.conf"]
+
+  domain-ns:
+    <<: *node
+    container_name: domain-ns
+    hostname: domain-ns
+    networks: { auth_net: { ipv4_address: 172.16.3.30 } }
+    environment:
+      STATIC_ROUTES: "172.16.2.0/24 via 172.16.3.3"
+    volumes:
+      - ./configs/domain-ns/named.conf:/etc/bind/named.conf:ro
+      - ./zones/example.com.zone:/etc/bind/zones/example.com.zone:ro
+    command: ["named","-g","-c","/etc/bind/named.conf"]
+
+  # ---------------- resolver subnet (172.16.2.0/24) ----------------
+  resolver:
+    <<: *node
+    container_name: resolver
+    hostname: resolver
+    networks: { resolver_net: { ipv4_address: 172.16.2.10 } }
+    environment:
+      STATIC_ROUTES: "172.16.3.0/24 via 172.16.2.3;172.16.1.0/24 via 172.16.2.2"
+    volumes:
+      - ./configs/resolver/named.conf:/etc/bind/named.conf:ro
+      - ./configs/resolver/db.root:/etc/bind/db.root:ro
+      - ./configs/resolver/rndc.key:/etc/bind/rndc.key:ro
+    command: ["named","-g","-c","/etc/bind/named.conf"]
+
+  # ---------------- client subnet (172.16.1.0/24) ----------------
+  webserver:
+    image: nginx:1.27-alpine
+    container_name: webserver
+    hostname: webserver
+    restart: unless-stopped
+    networks: { client_net: { ipv4_address: 172.16.1.20 } }
+    volumes:
+      - ./www/index.html:/usr/share/nginx/html/index.html:ro
+
+  client:
+    <<: *node
+    container_name: client
+    hostname: client
+    networks: { client_net: { ipv4_address: 172.16.1.10 } }
+    dns: [172.16.2.10]
+    environment:
+      STATIC_ROUTES: "172.16.2.0/24 via 172.16.1.2"
+      RESOLV_NS: "172.16.2.10"
+    command: ["sleep","infinity"]
+
+  # ---------------- routers (two interfaces each, IP forwarding, no NAT) ----------------
+  edge-router:
+    <<: *node
+    container_name: edge-router
+    hostname: edge-router
+    sysctls: ["net.ipv4.ip_forward=1"]
+    environment: { IP_FORWARD: "1" }
+    networks:
+      client_net:   { ipv4_address: 172.16.1.2 }
+      resolver_net: { ipv4_address: 172.16.2.2 }
+    command: ["sleep","infinity"]
+
+  core-router:
+    <<: *node
+    container_name: core-router
+    hostname: core-router
+    sysctls: ["net.ipv4.ip_forward=1"]
+    environment: { IP_FORWARD: "1" }
+    networks:
+      resolver_net: { ipv4_address: 172.16.2.3 }
+      auth_net:     { ipv4_address: 172.16.3.3 }
+    command: ["sleep","infinity"]
+
+networks:
+  client_net:
+    driver: bridge
+    internal: true
+    ipam: { config: [ { subnet: 172.16.1.0/24 } ] }
+  resolver_net:
+    driver: bridge
+    internal: true
+    ipam: { config: [ { subnet: 172.16.2.0/24 } ] }
+  auth_net:
+    driver: bridge
+    internal: true
+    ipam: { config: [ { subnet: 172.16.3.0/24 } ] }

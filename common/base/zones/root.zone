@@ -1,0 +1,14 @@
+; Root zone (.) served by root-ns (172.16.3.10)
+$TTL 3600
+.                   IN  SOA a.root-servers. admin.root-servers. (
+                            2026102201 ; serial
+                            3600       ; refresh
+                            1800       ; retry
+                            604800     ; expire
+                            3600 )     ; minimum
+.                   IN  NS  a.root-servers.
+a.root-servers.     IN  A   172.16.3.10
+
+; delegation of com. to tld-ns
+com.                IN  NS  a.gtld-servers.
+a.gtld-servers.     IN  A   172.16.3.20

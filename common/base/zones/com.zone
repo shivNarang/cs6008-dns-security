@@ -1,0 +1,10 @@
+; com. zone served by tld-ns (172.16.3.20)
+$TTL 3600
+com.                IN  SOA a.gtld-servers. admin.gtld-servers. (
+                            2026102201 3600 1800 604800 3600 )
+com.                IN  NS  a.gtld-servers.
+a.gtld-servers.     IN  A   172.16.3.20
+
+; delegation of example.com. to domain-ns
+example.com.        IN  NS  ns.example.com.
+ns.example.com.     IN  A   172.16.3.30
