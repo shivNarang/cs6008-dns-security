@@ -1,4 +1,4 @@
-# common/interceptor — on-path DNS interceptor (shared, frozen)
+# common/interceptor: on-path DNS interceptor (shared, frozen)
 
 C + libpcap engine used by Phase 2 (forge), Phase 4 (strip/downgrade), and
 Phase 6 (last-mile). Captures the diverted victim-bound DNS responses, relays
@@ -7,7 +7,7 @@ them transparently, and in `forge` mode rewrites the A answer for one name.
 ## How the diversion works (not done by this program)
 A route on the **router** sends the victim's inbound DNS responses to the
 attacker at L2. The attacker does **not** ip_forward; the kernel would drop
-those frames, so we `pcap_open_live` + `pcap_inject` to relay them on — exactly
+those frames, so we `pcap_open_live` + `pcap_inject` to relay them on, exactly
 the capture+inject libpcap path the brief requires.
 
 ## Build & run
@@ -21,12 +21,12 @@ ping -c1 172.16.2.10
 - `-v` victim (whose replies are diverted to us) `-t` name to hijack
 - `-r` rogue A rdata `-m relay|forge`
 - BPF filter selects only `ether dst <us> and udp src port 53 and dst <victim>`,
-  so our own injected frames (dst = victim MAC) are never recaptured — no loop.
+  so our own injected frames (dst = victim MAC) are never recaptured, no loop.
 
 ## forge logic
 Only the **exact** target name with `QTYPE=A` is touched; `www.<target>` and all
 other names are relayed byte-for-byte. The A rdata (4 bytes) is overwritten in
-place and IP+UDP checksums are recomputed — packet length is unchanged.
+place and IP+UDP checksums are recomputed, packet length is unchanged.
 
 ## Extension hooks (for the other phases)
 - **Phase 4 (strip):** in `forge_or_relay()`, drop `RRSIG`(46)/`DNSKEY`(48)

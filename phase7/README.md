@@ -1,4 +1,4 @@
-# Phase 7 — Encrypting the Last Mile (DoT / DoH)  [deploy half]
+# Phase 7: Encrypting the Last Mile (DoT / DoH)  [deploy half]
 
 **Split:** this directory is the *deploy + encrypted-resolution* half of Phase 7
 (private CA, resolver cert, DoT/DoH, "no cleartext" verification). The three
@@ -20,7 +20,7 @@ anchor. Both write git-ignored artifacts under `pki/out` and `signed`.
 ## 7.1 Deploy choices
 - **Private CA** (`pki/gen-ca.sh`): RSA-2048 root CA; resolver cert CN/SAN =
   `resolver.cs6008.local`, **DNS SAN only, no IP SAN**. Installed into the
-  client's system trust store (`update-ca-certificates`) — no `-k`/insecure bypass.
+  client's system trust store (`update-ca-certificates`), no `-k`/insecure bypass.
 - **Reach by name:** client has `extra_hosts: resolver.cs6008.local -> 172.16.2.10`
   and connects to that name; TLS is validated against the hostname, not an IP.
 - **Transport:** BIND `tls local-tls { cert-file; key-file; }` with
@@ -42,7 +42,7 @@ audit and heavier (HTTP/2 framing). Trade-off is visibility vs. blend-in.
 
 ## Still protects nothing beyond the last mile
 Encrypts/authenticates **client↔resolver** only. It does not protect the
-resolver↔auth path (still plain 53 upstream — DNSSEC covers integrity there, not
+resolver↔auth path (still plain 53 upstream, DNSSEC covers integrity there, not
 confidentiality), and it does not hide which resolver you use or stop a malicious
 resolver from lying (that's what the client-side DNSSEC validation in Phase 6
 Client B is for).

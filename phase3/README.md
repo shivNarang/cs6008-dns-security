@@ -1,4 +1,4 @@
-# Phase 3 — DNSSEC Chain of Trust
+# Phase 3: DNSSEC Chain of Trust
 
 Signed hierarchy + validating resolver. Reuses the Phase 1 topology; only the
 zones (now signed) and the resolver (now validating, root-anchored) change.
@@ -10,14 +10,14 @@ sh scripts/verify.sh    # AD flag + delv "fully validated" + web fetch
 docker compose down     # stop
 ```
 `sign.sh` regenerates `./signed/*.signed` and `configs/resolver/trust-anchor.conf`
-from the unsigned zones in `common/base/zones` — nothing signed is committed.
+from the unsigned zones in `common/base/zones`, nothing signed is committed.
 
 ## What this proves (3.2 Verify)
 - `dig +dnssec example.com` → `status: NOERROR`, `flags: ... ad`, with an RRSIG.
 - `delv -a trust-anchor.conf` → `; fully validated`.
 - Chain: root KSK → DS(com) → com KSK → DS(example.com) → example.com.
 
-## Attack (3.3) — TODO
+## Attack (3.3): TODO
 Re-run the Phase 2 forgery unchanged against this validating resolver and record
 that the forged (unsigned) answer is rejected (SERVFAIL / no rogue redirect).
 Needs the Phase 2 interceptor (see `common/interceptor`).

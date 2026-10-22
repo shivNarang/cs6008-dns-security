@@ -1,4 +1,4 @@
-# Phase 1 — Building the DNS Hierarchy
+# Phase 1: Building the DNS Hierarchy
 
 Three-tier hierarchy (root → com → example.com), recursive resolver (DNSSEC
 validation OFF), and a webserver, across three isolated subnets joined only by

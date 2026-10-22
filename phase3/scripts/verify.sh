@@ -1,7 +1,7 @@
 #!/bin/sh
 # Phase 3 verification: signed, validated resolution (no attacker in path).
 cd "$(dirname "$0")/.."
-echo "== [1] dig +dnssec example.com — expect 'ad' flag + RRSIG =="
+echo "== [1] dig +dnssec example.com, expect 'ad' flag + RRSIG =="
 docker exec client dig +dnssec example.com | grep -E "flags:|status:|IN[[:space:]]+A|RRSIG" | head -6
 echo
 echo "== [2] delv full-chain validation with the root KSK =="

