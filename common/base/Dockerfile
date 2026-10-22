@@ -5,6 +5,7 @@ FROM debian:trixie-slim
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         bind9 bind9-dnsutils bind9-utils \
         iproute2 iputils-ping curl wget tcpdump ldnsutils \
+        knot-dnsutils openssl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY entrypoint.sh /entrypoint.sh
