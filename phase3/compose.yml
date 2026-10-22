@@ -94,6 +94,28 @@ services:
       auth_net:     { ipv4_address: 172.16.3.3 }
     command: ["sleep","infinity"]
 
+  rogue-web:
+    image: nginx:1.27-alpine
+    container_name: rogue-web
+    restart: unless-stopped
+    networks: { client_net: { ipv4_address: 172.16.1.30 } }
+    volumes:
+      - ./www-rogue/index.html:/usr/share/nginx/html/index.html:ro
+
+  attacker:
+    build: ../common/interceptor
+    image: cs6008-dns-attacker
+    container_name: attacker
+    cap_add: [NET_ADMIN, NET_RAW]
+    restart: unless-stopped
+    networks: { resolver_net: { ipv4_address: 172.16.2.100 } }
+    environment:
+      IFACE: eth0
+      VICTIM: "172.16.2.10"
+      TARGET: "example.com"
+      ROGUE: "172.16.1.30"
+      MODE: "${MODE:-forge}"
+
 networks:
   client_net:   { driver: bridge, internal: true, ipam: { config: [ { subnet: 172.16.1.0/24 } ] } }
   resolver_net: { driver: bridge, internal: true, ipam: { config: [ { subnet: 172.16.2.0/24 } ] } }
