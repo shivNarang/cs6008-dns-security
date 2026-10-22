@@ -2,8 +2,6 @@
 *.o
 *.out
 a.out
-interceptor
-zone-walker
 *.signed
 K*.key
 K*.private
@@ -25,3 +23,8 @@ ca.key
 common/signing/out/
 phase*/signed/
 **/trust-anchor.conf
+
+# compiled attack binaries (built from source)
+common/interceptor/dns_intercept
+phase*/attacker/dns_intercept
+zonewalk
