@@ -1,0 +1,22 @@
+# Built / regenerated artifacts — grader rebuilds these from sources
+*.o
+*.out
+a.out
+interceptor
+zone-walker
+*.signed
+K*.key
+K*.private
+dsset-*
+keyset-*
+*.jbk
+*.jnl
+*.pcap
+*.pcapng
+# Private keys / certs (never commit)
+*.pem
+*.crt
+*.csr
+ca.key
+# OS cruft
+.DS_Store
