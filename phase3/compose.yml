@@ -1,0 +1,100 @@
+# CS6008 Assignment 2 - Phase 3: DNSSEC chain of trust (signed zones + validating resolver).
+# Reuses the Phase 1 topology; only the zones (now signed) and the resolver (now validating) change.
+name: cs6008-dns-phase3
+
+x-node: &node
+  image: cs6008-dns-base          # built from ../common/base (see sign.sh / README)
+  cap_add: [NET_ADMIN]
+  restart: unless-stopped
+
+services:
+  root-ns:
+    <<: *node
+    container_name: root-ns
+    hostname: root-ns
+    networks: { auth_net: { ipv4_address: 172.16.3.10 } }
+    environment: { STATIC_ROUTES: "172.16.2.0/24 via 172.16.3.3" }
+    volumes:
+      - ./configs/root-ns/named.conf:/etc/bind/named.conf:ro
+      - ./signed/root.signed:/etc/bind/zones/root.signed:ro
+    command: ["named","-g","-c","/etc/bind/named.conf"]
+
+  tld-ns:
+    <<: *node
+    container_name: tld-ns
+    hostname: tld-ns
+    networks: { auth_net: { ipv4_address: 172.16.3.20 } }
+    environment: { STATIC_ROUTES: "172.16.2.0/24 via 172.16.3.3" }
+    volumes:
+      - ./configs/tld-ns/named.conf:/etc/bind/named.conf:ro
+      - ./signed/com.signed:/etc/bind/zones/com.signed:ro
+    command: ["named","-g","-c","/etc/bind/named.conf"]
+
+  domain-ns:
+    <<: *node
+    container_name: domain-ns
+    hostname: domain-ns
+    networks: { auth_net: { ipv4_address: 172.16.3.30 } }
+    environment: { STATIC_ROUTES: "172.16.2.0/24 via 172.16.3.3" }
+    volumes:
+      - ./configs/domain-ns/named.conf:/etc/bind/named.conf:ro
+      - ./signed/example.com.signed:/etc/bind/zones/example.com.signed:ro
+    command: ["named","-g","-c","/etc/bind/named.conf"]
+
+  resolver:
+    <<: *node
+    container_name: resolver
+    hostname: resolver
+    networks: { resolver_net: { ipv4_address: 172.16.2.10 } }
+    environment: { STATIC_ROUTES: "172.16.3.0/24 via 172.16.2.3;172.16.1.0/24 via 172.16.2.2" }
+    volumes:
+      - ./configs/resolver/named.conf:/etc/bind/named.conf:ro
+      - ./configs/resolver/db.root:/etc/bind/db.root:ro
+      - ./configs/resolver/rndc.key:/etc/bind/rndc.key:ro
+      - ./configs/resolver/trust-anchor.conf:/etc/bind/trust-anchor.conf:ro
+    command: ["named","-g","-c","/etc/bind/named.conf"]
+
+  webserver:
+    image: nginx:1.27-alpine
+    container_name: webserver
+    hostname: webserver
+    restart: unless-stopped
+    networks: { client_net: { ipv4_address: 172.16.1.20 } }
+    volumes:
+      - ../common/base/www/index.html:/usr/share/nginx/html/index.html:ro
+
+  client:
+    <<: *node
+    container_name: client
+    hostname: client
+    networks: { client_net: { ipv4_address: 172.16.1.10 } }
+    dns: [172.16.2.10]
+    environment: { STATIC_ROUTES: "172.16.2.0/24 via 172.16.1.2", RESOLV_NS: "172.16.2.10" }
+    command: ["sleep","infinity"]
+
+  edge-router:
+    <<: *node
+    container_name: edge-router
+    hostname: edge-router
+    sysctls: ["net.ipv4.ip_forward=1"]
+    environment: { IP_FORWARD: "1" }
+    networks:
+      client_net:   { ipv4_address: 172.16.1.2 }
+      resolver_net: { ipv4_address: 172.16.2.2 }
+    command: ["sleep","infinity"]
+
+  core-router:
+    <<: *node
+    container_name: core-router
+    hostname: core-router
+    sysctls: ["net.ipv4.ip_forward=1"]
+    environment: { IP_FORWARD: "1" }
+    networks:
+      resolver_net: { ipv4_address: 172.16.2.3 }
+      auth_net:     { ipv4_address: 172.16.3.3 }
+    command: ["sleep","infinity"]
+
+networks:
+  client_net:   { driver: bridge, internal: true, ipam: { config: [ { subnet: 172.16.1.0/24 } ] } }
+  resolver_net: { driver: bridge, internal: true, ipam: { config: [ { subnet: 172.16.2.0/24 } ] } }
+  auth_net:     { driver: bridge, internal: true, ipam: { config: [ { subnet: 172.16.3.0/24 } ] } }
