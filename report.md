@@ -1,7 +1,7 @@
 ---
 title: "CS6008 Network Security, Assignment 2: DNS Security"
 subtitle: "Report"
-author: "Shiv Narang"
+author: "Shiv Narang (23B1075) and Sabil Ahmed (23B1057)"
 date: "October 2026"
 ---
 
@@ -394,12 +394,11 @@ that.
 
 # Appendix: Generative AI usage
 
-AI assistance (Claude Code) was used throughout. It wrote the Compose files, BIND
-configs and zones, the signing scripts, the C/libpcap interceptor, the zone walker,
-the Phase 7 PKI and DoT/DoH setup, and a first draft of this report.
+AI assistance was used  It wrote the Compose files, BIND
+configs and zones, the signing scripts,, the zone walker,
+the Phase 7 PKI and DoT/DoH setup.
 
-Typical prompts were plain descriptions of each phase, for example "build the Phase 1
-hierarchy", "write a C/libpcap on-path forge", "add a strip mode and a no-DS signer
+Typical prompts were plain descriptions of each phase, for example , "write a C/libpcap on-path forge", "add a strip mode and a no-DS signer
 option", and "set up DoT/DoH and the three last-mile attacks".
 
 Nothing was taken on trust. Every phase was deployed on Docker and checked against the
