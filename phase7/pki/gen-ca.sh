@@ -25,3 +25,9 @@ openssl x509 -req -in resolver.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
 
 echo ">> CA + resolver cert generated in $OUT"
 openssl x509 -in resolver.crt -noout -subject -ext subjectAltName | sed 's/^/   /'
+
+# 4) ROGUE cert for the impersonation attempt: same name, self-signed, NOT the lab CA.
+openssl req -x509 -newkey rsa:2048 -nodes -keyout rogue.key -out rogue.crt \
+    -days 825 -subj "/O=Totally Legit/CN=$NAME" \
+    -addext "subjectAltName=DNS:$NAME" >/dev/null 2>&1
+echo ">> rogue (untrusted) cert for $NAME generated in $OUT"

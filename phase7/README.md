@@ -1,17 +1,17 @@
-# Phase 7: Encrypting the Last Mile (DoT / DoH)  [deploy half]
+# Phase 7: Encrypting the Last Mile (DoT / DoH)
 
-**Split:** this directory is the *deploy + encrypted-resolution* half of Phase 7
-(private CA, resolver cert, DoT/DoH, "no cleartext" verification). The three
-**attack** attempts (7.3: alter-in-transit, rogue cert, block-transport × two
-clients) build on the Phase 6 last-mile attacker and are the paired half.
+Authenticate and encrypt the client-resolver link, then mount the last-mile attack
+again from three angles and account for each result.
 
 Reuses the Phase 3 signed hierarchy; adds TLS on the resolver and a client that
-reaches it **by name** over an encrypted, authenticated transport.
+reaches it **by name** over an encrypted, authenticated transport, plus the Phase 6
+on-path attacker and a rogue resolver for the attack half.
 
 ## Run
 ```sh
-sh scripts/deploy.sh    # CA + cert + signed zones, then start the stack
-sh scripts/verify.sh    # DoT + DoH resolve, cert enforced, no cleartext :53
+sh scripts/deploy.sh         # CA + certs + signed zones, then start the stack
+sh scripts/verify.sh         # DoT + DoH resolve, cert enforced, no cleartext :53
+sh scripts/run-attacks.sh    # 7.3: the three attempts x two clients + matrix
 docker compose down
 ```
 `pki.sh` makes the CA + resolver cert; `sign.sh` makes the signed zones + trust
@@ -35,14 +35,71 @@ anchor. Both write git-ignored artifacts under `pki/out` and `signed`.
 - **No cleartext:** edge-router capture during a DoT lookup = 0 packets on :53,
   31 on :853.
 
-## Which transport & why (7.4, short)
-Deployed **both**, lead with DoT. DoT (dedicated 853) is simple and easy to see/
-block on the network; DoH (443, looks like HTTPS) is harder to block but harder to
-audit and heavier (HTTP/2 framing). Trade-off is visibility vs. blend-in.
+## 7.3 Attack: three attempts against two client policies
 
-## Still protects nothing beyond the last mile
-Encrypts/authenticates **client↔resolver** only. It does not protect the
-resolver↔auth path (still plain 53 upstream, DNSSEC covers integrity there, not
-confidentiality), and it does not hide which resolver you use or stop a malicious
-resolver from lying (that's what the client-side DNSSEC validation in Phase 6
-Client B is for).
+Two client policies (same client box, two resolve scripts in `client-bin/`):
+
+- **strict** (`resolve-strict.sh`): DoT only, cert validated against the lab CA and
+  the hostname. If the encrypted transport is not available it fails. Never cleartext.
+- **lax** (`resolve-lax.sh`): prefer DoT, but if the encrypted transport cannot be
+  reached, fall back to plain :53. A bad certificate is treated as an attack, not an
+  unavailable transport, so it does not trigger fallback.
+
+All on-path controls live on `edge-router` (`scripts/net.sh`): `divert` (client :53
+through the attacker), `block` (drop TCP 853/443), `dnat-on` (redirect resolver :853
+to the rogue resolver).
+
+Measured outcomes (`sh scripts/run-attacks.sh`):
+
+```
+================= 7.3 outcome matrix (does the attack land?) =================
+ attempt                         | strict (refuses cleartext) | lax (permits cleartext)
+---------------------------------+----------------------------+-------------------------
+ (i)  alter answer in transit    | no  (TLS integrity)        | no  (TLS integrity)
+ (ii) rogue-cert impersonation   | no  (cert not trusted)     | no  (cert not trusted)
+ (iii) block transport, downgrade| no, fails closed (DoS)     | YES, forged to rogue
+=============================================================================
+```
+
+- **(i) alter in transit.** The attacker is on-path and forging, but the DNS is inside
+  TLS. The cleartext forge tool sees no :53 to touch, and a capture of 853 has zero
+  readable `example.com` strings. Both clients get the real 172.16.1.20.
+- **(ii) rogue cert.** `dnat-on` sends the resolver's 853 to a rogue server whose cert
+  names `resolver.cs6008.local` but is self-signed, not issued by the lab CA. Both
+  clients reject it: `handshake failed (Error in the certificate)`. Neither falls for it.
+- **(iii) block + downgrade.** `block` drops 853/443 and `divert` + forge poisons :53.
+  Strict gets `connection timeout for ...@853` and no answer: it fails closed. Lax sees
+  the transport is down, falls back to :53, and takes the forged `172.16.1.30` (rogue
+  HACKED page). This is the only combination that lands.
+
+## 7.4 Report answers
+
+**Each attempt and client (above matrix).** Five of the six combinations fail. The one
+that lands, (iii) against lax, does not beat the cryptography: it beats a client policy
+that still allows cleartext. With that fallback removed (strict), the same attack only
+denies service.
+
+**DoT or DoH, and drawbacks.** We deployed both and lead with DoT. DoT on its own port
+853 is simple and easy to audit, and just as easy to spot and block on the network,
+which is exactly what made attempt (iii) possible to stage. DoH on 443 blends into
+normal HTTPS and is much harder to block, at the cost of being harder to audit and
+heavier because of the HTTP/2 framing. The choice is visibility versus blend-in.
+
+**What an encrypted, authenticated last mile still does not protect.** It protects the
+client-resolver hop only. It does nothing for the resolver-to-authoritative path, which
+is still plain :53 upstream (DNSSEC gives integrity there, not confidentiality). It does
+not hide which resolver you talk to, and it does not stop a malicious or misconfigured
+resolver from lying to you over a perfectly valid TLS session: the channel is
+authenticated, the answer is not. Only client-side DNSSEC validation (Phase 6, Client B)
+catches that.
+
+## Commands (reproduce)
+
+```
+sh scripts/deploy.sh
+sh scripts/verify.sh                 # 7.2 encrypted resolution + no cleartext
+sh scripts/attempt1-tamper.sh        # (i)
+sh scripts/attempt2-roguecert.sh     # (ii)
+sh scripts/attempt3-downgrade.sh     # (iii)
+sh scripts/run-attacks.sh            # all three + the matrix
+```

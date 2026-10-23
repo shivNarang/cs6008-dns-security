@@ -68,8 +68,47 @@ services:
     environment: { STATIC_ROUTES: "172.16.2.0/24 via 172.16.1.2" }
     volumes:
       - ./pki/out/ca.crt:/certs/ca.crt:ro
+      - ./client-bin:/opt/bin:ro                # resolve-strict.sh / resolve-lax.sh
     # install the lab CA into the system trust store, then idle
     command: ["sh","-c","cp /certs/ca.crt /usr/local/share/ca-certificates/lab-ca.crt && update-ca-certificates >/dev/null 2>&1; sleep infinity"]
+
+  # rogue web server the forgeries try to send the client to (Phase 2 target)
+  rogue-web:
+    image: nginx:1.27-alpine
+    container_name: rogue-web
+    restart: unless-stopped
+    networks: { client_net: { ipv4_address: 172.16.1.30 } }
+    volumes:
+      - ./www-rogue/index.html:/usr/share/nginx/html/index.html:ro
+
+  # on-path attacker on the client subnet (libpcap). Used for the cleartext
+  # forge once the encrypted transport has been knocked out (attempt iii).
+  attacker:
+    build: ../common/interceptor
+    image: cs6008-dns-attacker
+    container_name: attacker
+    cap_add: [NET_ADMIN, NET_RAW]
+    restart: unless-stopped
+    networks: { client_net: { ipv4_address: 172.16.1.100 } }
+    environment:
+      IFACE: eth0
+      VICTIM: "172.16.1.10"
+      TARGET: "example.com"
+      ROGUE: "172.16.1.30"
+      MODE: "${MODE:-relay}"
+
+  # rogue resolver presenting a certificate for resolver.cs6008.local that is NOT
+  # signed by the lab CA (attempt ii). It only has to complete a TLS handshake;
+  # the client rejects the cert before any query. attempt2.sh DNATs 853 here.
+  rogue-resolver:
+    <<: *node
+    container_name: rogue-resolver
+    networks: { resolver_net: { ipv4_address: 172.16.2.200 } }
+    environment: { STATIC_ROUTES: "172.16.1.0/24 via 172.16.2.2" }
+    volumes:
+      - ./pki/out/rogue.crt:/certs/rogue.crt:ro
+      - ./pki/out/rogue.key:/certs/rogue.key:ro
+    command: ["sh","-c","openssl s_server -quiet -accept 853 -cert /certs/rogue.crt -key /certs/rogue.key -naccept 1000 >/dev/null 2>&1"]
 
   edge-router:
     <<: *node

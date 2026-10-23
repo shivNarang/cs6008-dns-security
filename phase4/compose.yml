@@ -1,0 +1,114 @@
+# CS6008 Assignment 2 - Phase 4: signature stripping and downgrade.
+# Same signed hierarchy and validating resolver as Phase 3. The attacker runs in
+# STRIP mode: for example.com it hands the resolver a bare forged A with no RRSIG.
+# Run A (DS present in com)  -> resolver still demands a signature -> SERVFAIL.
+# Run B (no DS in com)       -> delegation is insecure -> forged A is accepted.
+name: cs6008-dns-phase4
+
+x-node: &node
+  image: cs6008-dns-base
+  cap_add: [NET_ADMIN]
+  restart: unless-stopped
+
+services:
+  root-ns:
+    <<: *node
+    container_name: root-ns
+    networks: { auth_net: { ipv4_address: 172.16.3.10 } }
+    environment: { STATIC_ROUTES: "172.16.2.0/24 via 172.16.3.3" }
+    volumes:
+      - ./configs/root-ns/named.conf:/etc/bind/named.conf:ro
+      - ./signed/root.signed:/etc/bind/zones/root.signed:ro
+    command: ["named","-g","-c","/etc/bind/named.conf"]
+  tld-ns:
+    <<: *node
+    container_name: tld-ns
+    networks: { auth_net: { ipv4_address: 172.16.3.20 } }
+    environment: { STATIC_ROUTES: "172.16.2.0/24 via 172.16.3.3" }
+    volumes:
+      - ./configs/tld-ns/named.conf:/etc/bind/named.conf:ro
+      - ./signed/com.signed:/etc/bind/zones/com.signed:ro
+    command: ["named","-g","-c","/etc/bind/named.conf"]
+  domain-ns:
+    <<: *node
+    container_name: domain-ns
+    networks: { auth_net: { ipv4_address: 172.16.3.30 } }
+    environment: { STATIC_ROUTES: "172.16.2.0/24 via 172.16.3.3" }
+    volumes:
+      - ./configs/domain-ns/named.conf:/etc/bind/named.conf:ro
+      - ./signed/example.com.signed:/etc/bind/zones/example.com.signed:ro
+    command: ["named","-g","-c","/etc/bind/named.conf"]
+
+  resolver:
+    <<: *node
+    container_name: resolver
+    networks: { resolver_net: { ipv4_address: 172.16.2.10 } }
+    environment: { STATIC_ROUTES: "172.16.3.0/24 via 172.16.2.3;172.16.1.0/24 via 172.16.2.2" }
+    volumes:
+      - ./configs/resolver/named.conf:/etc/bind/named.conf:ro
+      - ./configs/resolver/db.root:/etc/bind/db.root:ro
+      - ./configs/resolver/rndc.key:/etc/bind/rndc.key:ro
+      - ./configs/resolver/trust-anchor.conf:/etc/bind/trust-anchor.conf:ro
+    command: ["named","-g","-c","/etc/bind/named.conf"]
+
+  webserver:
+    image: nginx:1.27-alpine
+    container_name: webserver
+    restart: unless-stopped
+    networks: { client_net: { ipv4_address: 172.16.1.20 } }
+    volumes:
+      - ../common/base/www/index.html:/usr/share/nginx/html/index.html:ro
+
+  rogue-web:
+    image: nginx:1.27-alpine
+    container_name: rogue-web
+    restart: unless-stopped
+    networks: { client_net: { ipv4_address: 172.16.1.30 } }
+    volumes:
+      - ./www-rogue/index.html:/usr/share/nginx/html/index.html:ro
+
+  client:
+    <<: *node
+    container_name: client
+    networks: { client_net: { ipv4_address: 172.16.1.10 } }
+    dns: [172.16.2.10]
+    environment: { STATIC_ROUTES: "172.16.2.0/24 via 172.16.1.2", RESOLV_NS: "172.16.2.10" }
+    command: ["sleep","infinity"]
+
+  attacker:
+    build: ../common/interceptor
+    image: cs6008-dns-attacker
+    container_name: attacker
+    cap_add: [NET_ADMIN, NET_RAW]
+    restart: unless-stopped
+    networks: { resolver_net: { ipv4_address: 172.16.2.100 } }
+    environment:
+      IFACE: eth0
+      VICTIM: "172.16.2.10"       # resolver: its inbound responses are diverted to us
+      TARGET: "example.com"
+      ROGUE: "172.16.1.30"
+      MODE: "${MODE:-strip}"       # strip = drop the RRSIG, hand back a lone forged A
+
+  edge-router:
+    <<: *node
+    container_name: edge-router
+    sysctls: ["net.ipv4.ip_forward=1"]
+    environment: { IP_FORWARD: "1" }
+    networks:
+      client_net:   { ipv4_address: 172.16.1.2 }
+      resolver_net: { ipv4_address: 172.16.2.2 }
+    command: ["sleep","infinity"]
+  core-router:
+    <<: *node
+    container_name: core-router
+    sysctls: ["net.ipv4.ip_forward=1"]
+    environment: { IP_FORWARD: "1" }
+    networks:
+      resolver_net: { ipv4_address: 172.16.2.3 }
+      auth_net:     { ipv4_address: 172.16.3.3 }
+    command: ["sleep","infinity"]
+
+networks:
+  client_net:   { driver: bridge, internal: true, ipam: { config: [ { subnet: 172.16.1.0/24 } ] } }
+  resolver_net: { driver: bridge, internal: true, ipam: { config: [ { subnet: 172.16.2.0/24 } ] } }
+  auth_net:     { driver: bridge, internal: true, ipam: { config: [ { subnet: 172.16.3.0/24 } ] } }

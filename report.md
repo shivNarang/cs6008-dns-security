@@ -1,7 +1,7 @@
 ---
 title: "CS6008 Network Security, Assignment 2: DNS Security"
 subtitle: "Report"
-author: "Team: Shiv Narang & Sabil"
+author: "Shiv Narang"
 date: "October 2026"
 ---
 
@@ -195,67 +195,202 @@ a stub that does not validate. That last hop is Phase 6.
 Private keys do not belong in the repo. We commit only the signing scripts and
 the public trust anchor; the KSK and ZSK private keys are regenerated each run.
 
-# Phase 7: Encrypting the Last Mile (DoT / DoH), deploy half
-
-Our split: this half covers the deployment, the encrypted resolution, and the
-no-cleartext check. The three attack attempts in 7.3 build on the Phase 6
-attacker and are Sabil's half.
+# Phase 4: Signature Stripping and Downgrade
 
 ## Design choices
 
-We stand up a private CA (`pki/gen-ca.sh`): an RSA-2048 root CA issues the
-resolver a certificate whose CN and SAN are `resolver.cs6008.local`, with a DNS
-SAN only and no IP SAN. The CA goes into the client's system trust store with
-`update-ca-certificates`, so there is no `-k` or insecure bypass.
+Forging a signed answer failed in Phase 3, so here the attacker tries to make the
+signed zone look unsigned and get the plain Phase 2 forgery accepted again. The
+interceptor gets a third mode, `strip` (see `handle_dns()`): for `example.com` it
+rewrites the A to the rogue and cuts the message off right after that record, so the
+RRSIG and every other DNSSEC record is gone and the resolver is handed a bare,
+unsigned-looking A. The attacker holds no private keys.
 
-The client reaches the resolver by name, never by IP. It has
-`extra_hosts: resolver.cs6008.local -> 172.16.2.10` and connects to that name, so
-the certificate is checked against the hostname. On the resolver we add
-`tls local-tls { cert-file; key-file; }` with `listen-on port 853 tls` for DoT
-and `listen-on port 443 tls ... http` for DoH. Plain port 53 stays up so the
-later downgrade attempt has a fallback to target. The Phase 3 DNSSEC validation
-still runs upstream.
+The two runs differ by one line in the signer (`NODS` in `sign-all.sh`), which tells
+`com` whether to publish the DS for `example.com`.
+
+## Run A: com publishes the DS (secure delegation)
+
+```
+# baseline (no attacker): example.com validates
+;; flags: qr rd ra ad                                   # authenticated
+# strip attack:
+$ docker exec client dig example.com
+;; ->>HEADER<<- status: SERVFAIL
+# resolver log:
+insecurity proof failed resolving 'example.com/A/IN': 172.16.3.30#53
+```
+
+## Run B: com publishes no DS (insecure delegation)
+
+```
+# baseline (no attacker): example.com resolves but is NOT authenticated
+;; flags: qr rd ra                                      # no ad flag, insecure
+# same strip attack now lands:
+$ docker exec client dig +short example.com
+172.16.1.30                                             # rogue "HACKED" page
+```
+
+## Report answers
+
+In Run A the signatures, and even the DS, can be stripped on the wire, but the
+attacker still cannot make the zone look unsigned. "Unsigned" is not the absence of
+signatures, it is a signed statement by the parent that the child has no DS. `com`
+still says, with a signature the attacker cannot forge, that `example.com` is signed,
+so when the resolver is handed an unsigned answer for a name that must be signed it
+returns SERVFAIL ("insecurity proof failed") rather than trust it.
+
+In Run B the single change is dropping `example.com`'s DS from `com`. That flips the
+parent's signed statement to "this child is insecure", `com` now carries a signed NSEC
+proving no DS exists, and the resolver believes it because it is authenticated. From
+then on `example.com` is plain DNS and the Phase 2 forgery works again.
+
+So downgrade resistance does not come from the child being signed. It comes from the
+secure delegation: the DS in the parent, chained to the trust anchor. The exact
+operator mistake that forfeits it is signing a zone but never publishing (or later
+dropping) its DS in the parent.
+
+# Phase 5: Zone Walking
+
+## Design choices
+
+A signed zone must prove a name does not exist, and that proof is signed ahead of
+time, before anyone knows which name will be asked. It cannot be about the queried
+name, so it reveals something about the names that do exist. With NSEC, what it reveals
+is the next existing name. Our `example.com` advertises only `example.com` and `www`;
+the rest (`backup, dev, git, mail, staging, vpn`) are internal names that appear
+nowhere public.
+
+## Verify and attack
+
+A nonexistent name is denied with signed NSEC records that each point from one real
+name to the next, which leaks a real neighbour. Following that chain from the apex
+recovers the whole zone, one query per name (`scripts/zonewalk.sh`, which uses `dig`,
+no Scapy or dnspython):
+
+```
+$ sh scripts/walk.sh
+queries sent : 9
+names recovered:
+  backup.example.com. 10.0.0.5     dev.example.com.  10.0.0.6
+  git.example.com.    10.0.0.7     mail.example.com. 10.0.0.8
+  ns.example.com.     172.16.3.30  staging...  10.0.0.9   vpn... 10.0.0.10
+  www.example.com.    172.16.1.20
+```
+
+Nine names in nine queries, inside the (names + 2) budget.
+
+### Fix
+
+Re-signing with NSEC3 (`NSEC3=1 sh sign.sh`) hashes the owner names before chaining
+them. The same walk now returns no NSEC to follow and recovers nothing, while a
+nonexistent name still gets an authenticated denial, now via NSEC3.
+
+## Report answers
+
+NSEC made the walk possible. Plain DNS answers NXDOMAIN on demand with nothing about
+other names; DNSSEC cannot sign on demand without an online key, so denial is
+precomputed as one NSEC per gap between adjacent names, and those records chain every
+name to the next. NSEC3 hashing stops the online walk, but it costs the operator extra
+records and signing work, and it is not secrecy: an enumerator can still count the
+records to learn the zone size and take the hashes offline for a dictionary attack. The
+real fix for secret names is to keep them out of public DNS.
+
+# Phase 6: Last-Mile Response Forgery
+
+## Design choices
+
+The resolver validates, but the hop from resolver to client carries no proof of it: a
+stub trusts whatever appears to come from its resolver. So the attacker moves onto the
+client subnet (`172.16.1.100`) and a route on `edge-router` (not ARP spoofing) sends a
+client's inbound replies through it. Upstream is the Phase 3 signed, validating
+resolver, untouched. Two victims: `client-a`, a plain stub using `curl` and the OS
+resolver, and `client-b`, which validates itself with `delv` against its own root
+anchor.
+
+## Attack
+
+```
+# Client A (plain stub):
+client-a example.com      -> 172.16.1.30   (rogue "HACKED" page)
+client-a www.example.com  -> 172.16.1.20   (untargeted, untouched)
+
+# Client B (validating), same forgery on the wire:
+plain dig on client-b -> 172.16.1.30                        # would be fooled
+delv on client-b      -> RRSIG failed to verify
+                         resolution failed: RRSIG failed to verify
+```
+
+## Report answers
+
+DNSSEC validates upstream but does not stop this, because validation happens at the
+resolver while trust is placed by the stub. The resolver validated the real answer and
+set the `ad` flag, but `ad` is one bit in a cleartext packet on the last hop with
+nothing signing it, so an on-path attacker rewrites the answer and sets `ad` for free,
+and the stub believes it. Client B does not rely on `ad`: it runs its own validation
+against a trust anchor it holds, so it needs real signatures, which the attacker cannot
+produce, and the forged A is rejected. A plain `dig` on the same machine is fooled, so
+the difference is the local validation, not the network. Protection comes from
+validating where trust is placed, or from authenticating the hop itself, which is
+Phase 7.
+
+# Phase 7: Encrypting the Last Mile (DoT / DoH)
+
+## Design choices
+
+We stand up a private CA (`pki/gen-ca.sh`): an RSA-2048 root CA issues the resolver a
+certificate whose CN and SAN are `resolver.cs6008.local`, with a DNS SAN only and no
+IP SAN. The CA goes into the client's system trust store with `update-ca-certificates`,
+so there is no `-k` or insecure bypass. The client reaches the resolver by name, never
+by IP (`extra_hosts: resolver.cs6008.local -> 172.16.2.10`), so the certificate is
+checked against the hostname. On the resolver we add `tls local-tls { cert-file;
+key-file; }` with `listen-on port 853 tls` for DoT and `listen-on port 443 tls ... http`
+for DoH. Plain port 53 stays up so the downgrade attempt has something to fall back to.
+Phase 3 DNSSEC validation still runs upstream.
 
 ## Verify
 
 ```
-# DoT:
-;; TLS session (TLS1.3)-(ECDHE-X25519)-(RSA-PSS-RSAE-SHA256)-(AES-256-GCM)
-;; status: NOERROR; Flags: qr rd ra ad ;  example.com. IN A 172.16.1.20
-;; From 172.16.2.10@853(TLS)
-# DoH:
-;; HTTP session (HTTP/2-POST)-(resolver.cs6008.local/dns-query)-(status: 200)
-;; From 172.16.2.10@443(HTTPS)
-# validation really is enforced:
-+tls-hostname=wrong.name.local  -> WARNING: TLS, handshake failed (certificate error)
-missing CA file                 -> ERROR: failed to initialize crypto context
-# no cleartext (edge-router capture during a DoT lookup):
-cleartext :53 packets = 0        encrypted :853 packets = 31
+# DoT:  TLS session (TLS1.3)...  status: NOERROR, ad  example.com A 172.16.1.20  @853(TLS)
+# DoH:  HTTP session (HTTP/2-POST .../dns-query status: 200)  @443(HTTPS)
+# enforced: wrong hostname -> handshake failed (certificate error); missing CA -> fails
+# no cleartext on edge-router during a DoT lookup: :53 = 0 packets, :853 = 31
 ```
 
-## Report answers (our half)
+## Attack: three attempts against two client policies
 
-We deployed both DoT and DoH and lead with DoT. DoT on its own port 853 is simple
-and easy to audit, but just as easy to spot and block. DoH on 443 blends in with
-normal HTTPS and is much harder to block, but it is harder to audit and heavier
-because of the HTTP/2 framing. It is a visibility versus blend-in trade.
+`strict` uses DoT only and never falls back; `lax` prefers DoT but falls back to
+cleartext :53 when the encrypted transport cannot be reached (a bad cert is an attack,
+not an unavailable transport, so it does not trigger fallback). Measured:
 
-An encrypted, authenticated last mile only protects the client-to-resolver hop.
-It does nothing for the resolver-to-authoritative path, which is still plain port
-53 upstream (DNSSEC covers integrity there, not confidentiality). It does not
-hide which resolver you use, and it does not stop a malicious or misconfigured
-resolver from lying to you. Only client-side DNSSEC validation (Phase 6, Client
-B) catches that.
+```
+ attempt                         | strict (refuses cleartext) | lax (permits cleartext)
+---------------------------------+----------------------------+-------------------------
+ (i)  alter answer in transit    | no  (TLS integrity)        | no  (TLS integrity)
+ (ii) rogue-cert impersonation   | no  (cert not trusted)     | no  (cert not trusted)
+ (iii) block transport, downgrade| no, fails closed (DoS)     | YES, forged to rogue
+```
 
-# Phases 4, 5, 6 and the Phase 7 attack half (Sabil)
+(i) The DNS is inside TLS, so the cleartext forge tool sees nothing and a capture of
+853 has zero readable `example.com` strings; both clients get the real answer. (ii) A
+rogue server presents a cert for the right name but self-signed, not from the lab CA;
+both clients reject it (`handshake failed, certificate error`). (iii) Blocking 853/443
+and forging :53 downgrades only the lax client, which falls back to cleartext and takes
+`172.16.1.30`; the strict client fails closed.
 
-- **Phase 4, signature stripping and downgrade.** Extend `forge_or_relay()` in
-  `common/interceptor/dns_intercept.c` (the `PHASE4` hook) with a strip mode.
-- **Phase 5, zone walking.** Walk the Phase 3 NSEC zone, then fix it by
-  re-signing with `NSEC3=1 sh run.sh` in `common/signing`.
-- **Phase 6, last-mile forgery.** Same tool, diversion on edge-router, victim is
-  the client (a plain stub vs a validating one).
-- **Phase 7 attack half.** The three attempts against the two client types.
+## Report answers
+
+Five of six combinations fail. The one that lands, (iii) against lax, does not beat the
+cryptography; it beats a client policy that still allows cleartext. We deployed both DoT
+and DoH and lead with DoT: DoT on its own port 853 is simple to audit and just as simple
+to spot and block (which is what staged attempt iii), while DoH on 443 blends into
+HTTPS and resists blocking at the cost of being harder to audit and heavier. An
+encrypted, authenticated last mile protects the client-resolver hop only. It does
+nothing for the resolver-to-authoritative path (still plain :53, DNSSEC gives integrity
+not confidentiality there), it does not hide which resolver you use, and it does not
+stop a malicious or misconfigured resolver from lying over a valid TLS session: the
+channel is authenticated, the answer is not. Only client-side DNSSEC validation catches
+that.
 
 # Appendix: Generative AI usage
 
@@ -263,20 +398,25 @@ We used AI assistance (Claude Code) to build this. What it did and how we checke
 it:
 
 - **What it did:** scaffolded the repo; wrote the Compose files, BIND zone and
-  daemon configs, and the routing scripts; wrote the DNSSEC signing scripts; wrote
-  the C/libpcap interceptor; wrote the Phase 7 PKI and DoT/DoH config; and drafted
-  this report from the captured output.
-- **Example prompts:** "split this 7-phase DNS assignment evenly"; "build the
-  Phase 1 base: compose, zones, routing"; "write the DNSSEC signing scripts and a
-  validating resolver"; "write a C/libpcap on-path interceptor with a selective
-  A-record forge"; "stand up the Phase 7 CA plus DoT/DoH and check there is no
-  cleartext".
+  daemon configs, and the routing scripts; wrote the DNSSEC signing scripts (NSEC,
+  NSEC3, and the no-DS insecure-delegation option); wrote the C/libpcap interceptor
+  with its relay, forge, and strip modes; wrote the NSEC zone walker; wrote the
+  Phase 7 PKI, DoT/DoH config, and the three attack attempts; and drafted this
+  report from the captured output.
+- **Example prompts:** "build the Phase 1 base: compose, zones, routing"; "write the
+  DNSSEC signing scripts and a validating resolver"; "write a C/libpcap on-path
+  interceptor with a selective A-record forge"; "add a strip mode that downgrades a
+  signed answer, and a signer option that omits the DS"; "walk an NSEC zone with dig
+  only, then fix it with NSEC3"; "stand up the Phase 7 CA plus DoT/DoH and run the
+  three last-mile attacks against a strict and a lax client".
 - **How we verified it:** we did not take any of it on trust. Every phase was
-  deployed on Docker and checked against the brief's own success criteria. Phase
-  1: resolution, fetch, isolation, and a referral capture. Phase 2: relay is
-  transparent, then forge sends example.com to the rogue while www is untouched.
-  Phase 3: the AD flag and `delv` saying "fully validated", then the re-run attack
-  giving SERVFAIL with the matching log line. Phase 7: DoT and DoH resolution, two
-  deliberate negative certificate tests that both fail, and a tcpdump on
-  edge-router showing zero cleartext on port 53. All commands are in each phase's
-  `scripts/`.
+  deployed on Docker and checked against the brief's own success criteria. Phase 1:
+  resolution, fetch, isolation, and a referral capture. Phase 2: relay transparent,
+  then forge sends example.com to the rogue while www is untouched. Phase 3: the AD
+  flag and `delv` "fully validated", then the re-run attack giving SERVFAIL. Phase 4:
+  Run A gives SERVFAIL ("insecurity proof failed"), Run B returns the rogue once the
+  DS is removed. Phase 5: the walk recovers all nine names, and recovers none after
+  the NSEC3 re-sign. Phase 6: Client A lands on the rogue, Client B's `delv` rejects
+  the forgery. Phase 7: DoT and DoH resolve, the rogue cert and in-transit tamper
+  both fail, and only the lax client is downgraded when the transport is blocked. All
+  commands are in each phase's `scripts/`.

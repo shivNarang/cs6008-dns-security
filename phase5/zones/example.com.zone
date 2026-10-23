@@ -1,0 +1,21 @@
+; example.com. zone for Phase 5 (zone walking).
+; Two names are advertised (example.com, www). The rest are internal service
+; hostnames that appear nowhere public. The whole point of the phase is that an
+; NSEC-signed zone still lets an attacker recover these hidden names.
+$TTL 3600
+example.com.        IN  SOA ns.example.com. admin.example.com. (
+                            2026102301 3600 1800 604800 3600 )
+example.com.        IN  NS  ns.example.com.
+ns.example.com.     IN  A   172.16.3.30
+
+; advertised
+example.com.        IN  A   172.16.1.20
+www.example.com.    IN  A   172.16.1.20
+
+; internal / not advertised anywhere
+backup.example.com.   IN  A   10.0.0.5
+dev.example.com.      IN  A   10.0.0.6
+git.example.com.      IN  A   10.0.0.7
+mail.example.com.     IN  A   10.0.0.8
+staging.example.com.  IN  A   10.0.0.9
+vpn.example.com.      IN  A   10.0.0.10

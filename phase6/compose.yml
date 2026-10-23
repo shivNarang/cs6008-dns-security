@@ -1,0 +1,128 @@
+# CS6008 Assignment 2 - Phase 6: last-mile response forgery.
+# Upstream is the Phase 3 signed, validating resolver, untouched. The attacker
+# moves onto the CLIENT subnet (172.16.1.100) and forges the resolver -> client
+# reply, where DNSSEC's guarantee runs out (a stub trusts whatever its resolver
+# appears to send). Two victims: client-a (plain stub) and client-b (validating).
+name: cs6008-dns-phase6
+
+x-node: &node
+  image: cs6008-dns-base
+  cap_add: [NET_ADMIN]
+  restart: unless-stopped
+
+services:
+  root-ns:
+    <<: *node
+    container_name: root-ns
+    networks: { auth_net: { ipv4_address: 172.16.3.10 } }
+    environment: { STATIC_ROUTES: "172.16.2.0/24 via 172.16.3.3" }
+    volumes:
+      - ./configs/root-ns/named.conf:/etc/bind/named.conf:ro
+      - ./signed/root.signed:/etc/bind/zones/root.signed:ro
+    command: ["named","-g","-c","/etc/bind/named.conf"]
+  tld-ns:
+    <<: *node
+    container_name: tld-ns
+    networks: { auth_net: { ipv4_address: 172.16.3.20 } }
+    environment: { STATIC_ROUTES: "172.16.2.0/24 via 172.16.3.3" }
+    volumes:
+      - ./configs/tld-ns/named.conf:/etc/bind/named.conf:ro
+      - ./signed/com.signed:/etc/bind/zones/com.signed:ro
+    command: ["named","-g","-c","/etc/bind/named.conf"]
+  domain-ns:
+    <<: *node
+    container_name: domain-ns
+    networks: { auth_net: { ipv4_address: 172.16.3.30 } }
+    environment: { STATIC_ROUTES: "172.16.2.0/24 via 172.16.3.3" }
+    volumes:
+      - ./configs/domain-ns/named.conf:/etc/bind/named.conf:ro
+      - ./signed/example.com.signed:/etc/bind/zones/example.com.signed:ro
+    command: ["named","-g","-c","/etc/bind/named.conf"]
+
+  resolver:
+    <<: *node
+    container_name: resolver
+    networks: { resolver_net: { ipv4_address: 172.16.2.10 } }
+    environment: { STATIC_ROUTES: "172.16.3.0/24 via 172.16.2.3;172.16.1.0/24 via 172.16.2.2" }
+    volumes:
+      - ./configs/resolver/named.conf:/etc/bind/named.conf:ro
+      - ./configs/resolver/db.root:/etc/bind/db.root:ro
+      - ./configs/resolver/rndc.key:/etc/bind/rndc.key:ro
+      - ./configs/resolver/trust-anchor.conf:/etc/bind/trust-anchor.conf:ro
+    command: ["named","-g","-c","/etc/bind/named.conf"]
+
+  webserver:
+    image: nginx:1.27-alpine
+    container_name: webserver
+    restart: unless-stopped
+    networks: { client_net: { ipv4_address: 172.16.1.20 } }
+    volumes:
+      - ../common/base/www/index.html:/usr/share/nginx/html/index.html:ro
+
+  rogue-web:
+    image: nginx:1.27-alpine
+    container_name: rogue-web
+    restart: unless-stopped
+    networks: { client_net: { ipv4_address: 172.16.1.30 } }
+    volumes:
+      - ./www-rogue/index.html:/usr/share/nginx/html/index.html:ro
+
+  # Client A: ordinary stub. Uses the OS resolver / curl and trusts whatever the
+  # resolver appears to send. No local validation.
+  client-a:
+    <<: *node
+    container_name: client-a
+    networks: { client_net: { ipv4_address: 172.16.1.10 } }
+    dns: [172.16.2.10]
+    environment: { STATIC_ROUTES: "172.16.2.0/24 via 172.16.1.2", RESOLV_NS: "172.16.2.10" }
+    command: ["sleep","infinity"]
+
+  # Client B: locally validating. Holds the root KSK as its own trust anchor and
+  # checks signatures itself with delv (see scripts/attack-b.sh).
+  client-b:
+    <<: *node
+    container_name: client-b
+    networks: { client_net: { ipv4_address: 172.16.1.11 } }
+    dns: [172.16.2.10]
+    environment: { STATIC_ROUTES: "172.16.2.0/24 via 172.16.1.2", RESOLV_NS: "172.16.2.10" }
+    volumes:
+      - ./configs/resolver/trust-anchor.conf:/etc/bind/trust-anchor.conf:ro
+    command: ["sleep","infinity"]
+
+  attacker:
+    build: ../common/interceptor
+    image: cs6008-dns-attacker
+    container_name: attacker
+    cap_add: [NET_ADMIN, NET_RAW]
+    restart: unless-stopped
+    networks: { client_net: { ipv4_address: 172.16.1.100 } }
+    environment:
+      IFACE: eth0
+      VICTIM: "${VICTIM:-172.16.1.10}"   # the client whose inbound replies we forge
+      TARGET: "example.com"
+      ROGUE: "172.16.1.30"
+      MODE: "${MODE:-relay}"
+
+  edge-router:
+    <<: *node
+    container_name: edge-router
+    sysctls: ["net.ipv4.ip_forward=1"]
+    environment: { IP_FORWARD: "1" }
+    networks:
+      client_net:   { ipv4_address: 172.16.1.2 }
+      resolver_net: { ipv4_address: 172.16.2.2 }
+    command: ["sleep","infinity"]
+  core-router:
+    <<: *node
+    container_name: core-router
+    sysctls: ["net.ipv4.ip_forward=1"]
+    environment: { IP_FORWARD: "1" }
+    networks:
+      resolver_net: { ipv4_address: 172.16.2.3 }
+      auth_net:     { ipv4_address: 172.16.3.3 }
+    command: ["sleep","infinity"]
+
+networks:
+  client_net:   { driver: bridge, internal: true, ipam: { config: [ { subnet: 172.16.1.0/24 } ] } }
+  resolver_net: { driver: bridge, internal: true, ipam: { config: [ { subnet: 172.16.2.0/24 } ] } }
+  auth_net:     { driver: bridge, internal: true, ipam: { config: [ { subnet: 172.16.3.0/24 } ] } }

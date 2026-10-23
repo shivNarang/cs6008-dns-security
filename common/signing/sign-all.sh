@@ -7,12 +7,16 @@
 # Env knobs:
 #   ALGO  : signing algorithm         (default ECDSAP256SHA256 = algo 13)
 #   NSEC3 : 1 => NSEC3 denial of existence (Phase 5 "fixed" zone); default NSEC
+#   NODS  : space-separated child zones whose DS we DO NOT publish in the parent.
+#           "example.com" => com is signed but gives no DS for it, so a validator
+#           treats example.com as an insecure (unsigned) delegation. Phase 4 Run B.
 set -eu
 
 ZONEDIR="${ZONEDIR:-/work/zones}"     # unsigned zone files (input)
 OUT="${OUT:-/work/out}"               # signed zones + keys + anchor (output)
 ALGO="${ALGO:-ECDSAP256SHA256}"
 NSEC3="${NSEC3:-0}"
+NODS="${NODS:-}"
 
 mkdir -p "$OUT"; find "$OUT" -mindepth 1 -delete 2>/dev/null || true; cd "$OUT"
 
@@ -67,10 +71,17 @@ echo "== sign child first, then chain DS upward =="
 # 1) example.com (leaf)
 sign example.com "$ZONEDIR/example.com.zone"
 
-# 2) com = base com zone + DS(example.com), then sign
+# 2) com = base com zone + DS(example.com), then sign.
+#    If example.com is listed in NODS we skip its DS, leaving an insecure
+#    delegation (signed proof of "no DS" is generated automatically). Run B.
 cp "$ZONEDIR/com.zone" com.work
-echo "; --- DS of example.com (chain of trust) ---" >> com.work
-ds_of example.com >> com.work
+case " $NODS " in
+    *" example.com "*)
+        echo ">> NODS: com will publish NO DS for example.com (insecure delegation)" ;;
+    *)
+        echo "; --- DS of example.com (chain of trust) ---" >> com.work
+        ds_of example.com >> com.work ;;
+esac
 sign com com.work
 
 # 3) root = base root zone + DS(com), then sign

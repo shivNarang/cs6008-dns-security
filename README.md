@@ -12,21 +12,29 @@ then add defenses (DNSSEC, DoT/DoH) one layer at a time.
 - `phase1/` … `phase7/`: one self-contained directory per phase (own compose.yml, configs, scripts, README)
 - `report.pdf`: final report, one section per phase (built from each person's section)
 
-## Work split
+## Status
 
-| Owner        | Phases                | Marks        |
-|--------------|-----------------------|--------------|
-| Shiv         | 1, 2, 3 + half of 7   | 40 + 7.5     |
-| Teammate     | 4, 5, 6 + half of 7   | 40 + 7.5     |
+All seven phases are built and verified end to end on Docker (Colima). Each
+`phaseN/` is self-contained: `scripts/deploy.sh` brings it up and
+`scripts/verify.sh` / the attack scripts reproduce the results in that phase's
+README.
 
-**Phase 7 split:** one person does deploy (private CA, resolver cert, DoT/DoH config);
-the other runs the three attack attempts against both client types and writes up the 6 outcomes.
+| Phase | Topic                          | Marks |
+|-------|--------------------------------|-------|
+| 1     | Build the hierarchy            | 10    |
+| 2     | On-path response forgery       | 15    |
+| 3     | DNSSEC chain of trust          | 15    |
+| 4     | Signature stripping / downgrade| 15    |
+| 5     | Zone walking                   | 10    |
+| 6     | Last-mile forgery              | 15    |
+| 7     | DoT / DoH + the three attacks  | 15    |
 
-## How we work independently
+## How the pieces fit
 
-1. Build `common/base`, `common/signing`, `common/interceptor` **together first**, then freeze.
-2. Each person copies the needed `common/` pieces into their own `phaseN/` dirs and works solo.
-3. Only re-sync if a `common/` file has a bug.
+1. `common/base`, `common/signing`, `common/interceptor` are the shared, frozen
+   foundations.
+2. Each `phaseN/` reuses them through mounts and its own compose, configs, and
+   scripts, so a phase can be deployed and graded on its own.
 
 ## Ground rules
 
