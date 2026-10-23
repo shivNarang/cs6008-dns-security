@@ -129,13 +129,20 @@ forge: www.example.com  -> 172.16.1.20
 forge: curl example.com -> <h1>:: HACKED ::</h1>
 ```
 
-The forgery on the wire, captured at the source and the destination of the same
-response (same transaction ID `0x8d38`, same QNAME and ports, only the A rewritten):
+The forgery on the wire: `tshark` excerpts of the same response captured at its source
+(domain-ns) and at its destination (resolver). Same transaction ID `0x8d38`, same QNAME,
+type, and ports; only the A rdata is rewritten in flight:
 
 ```
-domain-ns SENT    : 172.16.3.30 -> 172.16.2.10  resp 0x8d38  example.com A 172.16.1.20
-resolver RECEIVED : 172.16.3.30 -> 172.16.2.10  resp 0x8d38  example.com A 172.16.1.30
+# tshark on domain-ns (what the authoritative server actually sent):
+172.16.3.30 -> 172.16.2.10  DNS 159  Standard query response 0x8d38 A example.com A 172.16.1.20
+# tshark on resolver (what arrived after the attacker):
+172.16.3.30 -> 172.16.2.10  DNS 159  Standard query response 0x8d38 A example.com A 172.16.1.30
 ```
+
+The source address is still `172.16.3.30` because the attacker relays the packet with
+the server's IP intact; only the answer changed, which is exactly why the resolver
+accepts it.
 
 The resolver caches the poison: a second lookup is served from cache with a TTL
 that has already decayed, so it is not re-fetched:
@@ -344,7 +351,12 @@ $ docker exec walker /opt/walker/zonewalk -s 172.16.3.30 -g 172.16.2.3 -z exampl
 [zonewalk] walking example.com via NSEC at 172.16.3.30 (libpcap capture+inject)
   NSEC example.com         -> backup.example.com
   NSEC backup.example.com  -> dev.example.com
-  ...
+  NSEC dev.example.com     -> git.example.com
+  NSEC git.example.com     -> mail.example.com
+  NSEC mail.example.com    -> ns.example.com
+  NSEC ns.example.com      -> staging.example.com
+  NSEC staging.example.com -> vpn.example.com
+  NSEC vpn.example.com     -> www.example.com
   NSEC www.example.com     -> example.com
 NSEC queries sent : 9
 names recovered   : 8
@@ -374,8 +386,14 @@ nonexistent name still gets an authenticated denial, now via NSEC3:
 $ docker exec walker /opt/walker/zonewalk ...
   no NSEC returned for example.com : chain not exposed (NSEC3 or not signed)
 names recovered   : 0
-# denial still authenticated: F5OO...QLTA.example.com NSEC3 1 0 0 DF44E5F7... (signed)
+# the denial is still authenticated: an NSEC3 record over hashed names, plus its RRSIG
+TNEQ4S3S...AHV5MC4ATJS.example.com.  NSEC3  1 0 0 10004BC7...  (hashed owner)
+TNEQ4S3S...AHV5MC4ATJS.example.com.  RRSIG  NSEC3 13 3 3600 ...  example.com.   (signed)
 ```
+
+The walker is unchanged, so the recovery of zero names is purely the effect of NSEC3,
+and the nonexistent name still gets a signed NSEC3 denial, not an unsigned or missing
+response.
 
 ## Report answers
 
@@ -413,11 +431,17 @@ delv on client-b      -> RRSIG failed to verify resolving 'example.com/A/IN': 17
 ```
 
 A capture on the client subnet shows the forged reply arriving with the `ad`
-(authenticated-data) bit set, even though the attacker produced it:
+(authenticated-data) bit set, even though the attacker produced it. `tshark` field
+extraction of the `example.com` A response on its way to the client:
 
 ```
-resolver -> client   example.com A 172.16.1.30   ad_flag(authenticated) = True
+# fields: ip.src        dns.a          dns.flags.authenticated
+          172.16.2.10   172.16.1.30    1          # AD bit set on a forged answer
 ```
+
+The attacker sets (or leaves) the AD bit at will on the last hop; the stub has no
+signature to check, so it believes it. This is the capture behind the Client A result
+above.
 
 ## Report answers
 
@@ -455,11 +479,13 @@ Phase 3 DNSSEC validation still runs upstream.
 # enforced: wrong hostname -> handshake failed (certificate error); missing CA -> fails
 ```
 
-A `tshark` capture on edge-router during a DoT lookup confirms the last mile is
-encrypted and carries no cleartext DNS:
+A `tshark` capture on edge-router during a DoT lookup shows a TLS 1.3 handshake on 853
+and no DNS dissected anywhere (the query is inside the encrypted session):
 
 ```
-TLS records on 853 : 8        cleartext DNS on :53 : 0
+172.16.1.10 -> 172.16.2.10  TLSv1.3  385   Client Hello
+172.16.2.10 -> 172.16.1.10  TLSv1.3  1536  Server Hello, Change Cipher Spec, Application Data
+# tshark display filter "dns" on the same capture: 0 packets   # no cleartext DNS on :53
 ```
 
 ## Attack: three attempts against two client policies
@@ -488,7 +514,7 @@ and forging :53 downgrades only the lax client, which falls back to cleartext an
 Five of six combinations fail. The one that lands, (iii) against lax, does not beat the
 cryptography; it beats a client policy that still allows cleartext. We deployed both DoT
 and DoH and lead with DoT: DoT on its own port 853 is simple to audit and just as simple
-to spot and block (which is what staged attempt iii), while DoH on 443 blends into
+to spot and block (as demonstrated in attempt (iii)), while DoH on 443 blends into
 HTTPS and resists blocking at the cost of being harder to audit and heavier. An
 encrypted, authenticated last mile protects the client-resolver hop only. It does
 nothing for the resolver-to-authoritative path (still plain :53, DNSSEC gives integrity
