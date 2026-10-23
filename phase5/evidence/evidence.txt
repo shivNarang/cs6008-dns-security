@@ -1,10 +1,11 @@
 ### Phase 5 evidence
 
-## 5.2 verify: a nonexistent name is denied with a signed NSEC that reveals a neighbour
+## 5.2 verify: complete NSEC denial for nope.example.com (two records = full proof)
 example.com.		3600	IN	NSEC	backup.example.com. A NS SOA RRSIG NSEC DNSKEY
-example.com.		3600	IN	RRSIG	NSEC 13 2 3600 20261122154144 20261023154144 61070 example.com. x1Nvj5+r3Kkn+VYw48Ia503WibF+3UV+yUFCq3fk27v9seEPsVlwClth 1/VJeNd5ZV8xkMw07sBgf2c987CMaQ==
+mail.example.com.	3600	IN	NSEC	ns.example.com. A RRSIG NSEC
+   (mail -> ns covers 'nope'; the apex NSEC proves no wildcard)
 
-## 5.3 the C libpcap walker (injects queries, captures replies) follows the NSEC chain:
+## 5.3 C libpcap walker (injects queries, captures replies):
 [zonewalk] walking example.com via NSEC at 172.16.3.30 (libpcap capture+inject)
   NSEC example.com            -> backup.example.com
   NSEC backup.example.com     -> dev.example.com
@@ -27,16 +28,14 @@ names recovered   : 8
   vpn.example.com          10.0.0.10
   www.example.com          172.16.1.20
 
-## capture at domain-ns: the walker's injected NSEC queries (from 172.16.2.100) and the NSEC replies
-172.16.2.100 → 172.16.3.30  DNS 82 Standard query 0xc0fe NSEC example.com OPT
-172.16.3.30 → 172.16.2.100 DNS 477 Standard query response 0xc0fe NSEC example.com NSEC backup.example.com RRSIG NS ns.example.com RRSIG A 172.16.3.30 RRSIG OPT
-172.16.2.100 → 172.16.3.30  DNS 89 Standard query 0xfbd9 NSEC backup.example.com OPT
-172.16.3.30 → 172.16.2.100 DNS 480 Standard query response 0xfbd9 NSEC backup.example.com NSEC dev.example.com RRSIG NS ns.example.com RRSIG A 172.16.3.30 RRSIG OPT
-172.16.2.100 → 172.16.3.30  DNS 86 Standard query 0x006e NSEC dev.example.com OPT
-172.16.3.30 → 172.16.2.100 DNS 477 Standard query response 0x006e NSEC dev.example.com NSEC git.example.com RRSIG NS ns.example.com RRSIG A 172.16.3.30 RRSIG OPT
+## capture at domain-ns: injected NSEC queries (src 172.16.2.100) + NSEC replies
+172.16.2.100 → 172.16.3.30  DNS 82 Standard query 0x47ce NSEC example.com OPT
+172.16.3.30 → 172.16.2.100 DNS 477 Standard query response 0x47ce NSEC example.com NSEC backup.example.com RRSIG NS ns.example.com RRSIG A 172.16.3.30 RRSIG OPT
+172.16.2.100 → 172.16.3.30  DNS 89 Standard query 0xcf36 NSEC backup.example.com OPT
+172.16.3.30 → 172.16.2.100 DNS 480 Standard query response 0xcf36 NSEC backup.example.com NSEC dev.example.com RRSIG NS ns.example.com RRSIG A 172.16.3.30 RRSIG OPT
 
-## 5.3 fix: re-sign with NSEC3, the same C walker now recovers nothing
+## 5.3 fix: NSEC3 re-sign, same C walker recovers nothing
   no NSEC returned for example.com : chain not exposed (NSEC3 or not signed)
 names recovered   : 0
-denial still authenticated via NSEC3 (hashed owner names):
-U76HUHDHMNPC2DE2MQLDRR88P4PMG7BS.example.com. 3600 IN NSEC3 1 0 0 F5F31034AE283AE6 05R7RIE
+denial still authenticated via NSEC3:
+0397ND195NCVNT1EGHFN9DKKG1GU5T29.example.com. 3600 IN NSEC3 1 0 0 83BA7D626E173D

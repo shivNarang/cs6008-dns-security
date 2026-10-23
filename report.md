@@ -178,11 +178,13 @@ that the signer regenerates, and they are git-ignored.
 
 ## Verify (healthy signed hierarchy)
 
+All queries run on the `client` container against the resolver at `172.16.2.10`:
+
 ```
-$ dig +dnssec example.com
+$ docker exec client dig +dnssec @172.16.2.10 example.com
 ;; flags: qr rd ra ad; ...                             # authenticated-data flag set
 example.com.  3600  IN  RRSIG  A 13 2 3600 ...          # signature present
-$ delv -a trust-anchor.conf @172.16.2.10 example.com
+$ docker exec client delv -a trust-anchor.conf @172.16.2.10 example.com
 ; fully validated
 example.com.  3600  IN  A  172.16.1.20
 ```
@@ -197,11 +199,19 @@ The signed records travel in cleartext. A `tshark` capture on core-router of one
 ## Attack (Phase 2 forgery re-run, unchanged)
 
 ```
-$ docker exec client dig example.com
+$ docker exec client dig @172.16.2.10 example.com
 ;; ->>HEADER<<- status: SERVFAIL                        # forged answer rejected
 # resolver log:
 RRSIG failed to verify resolving 'example.com/A/IN': 172.16.3.30#53
+# the client fetch then fails to resolve at all (it gets neither the real nor the rogue page):
+$ docker exec client curl -v http://example.com
+* Could not resolve host: example.com
+curl: (6) Could not resolve host: example.com
 ```
+
+So the forgery does not poison the client; it denies it. The resolver returns
+SERVFAIL rather than an address, so `curl` cannot resolve the name and no page is
+fetched (contrast Phase 2, where the same packet poisoned the client to the rogue).
 
 ## Report answers
 
@@ -298,9 +308,11 @@ dropping) its DS in the parent.
 A signed zone must prove a name does not exist, and that proof is signed ahead of
 time, before anyone knows which name will be asked. It cannot be about the queried
 name, so it reveals something about the names that do exist. With NSEC, what it reveals
-is the next existing name. Our `example.com` advertises only `example.com` and `www`;
-the rest (`backup, dev, git, mail, staging, vpn`) are internal names that appear
-nowhere public.
+is the next existing name. Our `example.com` zone has nine owner names: the apex
+`example.com` and `www` are advertised, `ns` is the nameserver name (public through the
+NS record and glue), and the other six (`backup, dev, git, mail, staging, vpn`) are
+internal names that appear nowhere public. The walk should recover all of them, and in
+particular those six intentionally hidden ones.
 
 The walker is C with libpcap (`walker/zonewalk.c`): it builds each DNS query by hand,
 injects it with `pcap_inject`, and reads the reply back off the wire with libpcap, as
@@ -310,12 +322,20 @@ denial.
 ## Verify and attack
 
 A nonexistent name is denied with signed NSEC records that each point from one real
-name to the next, which leaks a real neighbour:
+name to the next, which leaks a real neighbour. The full authority section for
+`nope.example.com` carries two NSEC records, which together are the complete proof:
 
 ```
-$ dig +dnssec nope.example.com @172.16.3.30      # inspection only
-example.com.  NSEC  backup.example.com. A NS SOA RRSIG NSEC DNSKEY
+$ docker exec resolver dig +dnssec +norec nope.example.com @172.16.3.30
+# authority section (inspection only):
+mail.example.com.  3600  IN  NSEC  ns.example.com.      A RRSIG NSEC
+example.com.       3600  IN  NSEC  backup.example.com.  A NS SOA RRSIG NSEC DNSKEY
 ```
+
+The first NSEC (`mail -> ns`) proves `nope` does not exist, because `nope` sorts
+between `mail` and `ns`; the apex NSEC proves there is no `*.example.com` wildcard that
+could have synthesised an answer. Together they are the complete denial, and both leak
+a real neighbour, which is exactly what the walk exploits.
 
 Following that chain from the apex recovers the whole zone, one query per name:
 
@@ -332,7 +352,10 @@ names recovered   : 8
   ns 172.16.3.30   staging 10.0.0.9  vpn 10.0.0.10  www 172.16.1.20
 ```
 
-Nine queries recover all eight hidden names, inside the (names + 2) budget. The
+Nine NSEC queries recover all eight non-apex names: the six intentionally hidden ones
+(`backup, dev, git, mail, staging, vpn`) plus the nameserver name `ns` and the
+advertised `www`. That is within the (owner names + 2) budget for a zone of nine owner
+names, and the six hidden names, which appear nowhere public, are fully exposed. The
 queries really are injected by the walker, as a capture at domain-ns shows (source
 `172.16.2.100`, each NSEC reply carrying the next owner):
 
@@ -359,10 +382,11 @@ names recovered   : 0
 NSEC made the walk possible. Plain DNS answers NXDOMAIN on demand with nothing about
 other names; DNSSEC cannot sign on demand without an online key, so denial is
 precomputed as one NSEC per gap between adjacent names, and those records chain every
-name to the next. NSEC3 hashing stops the online walk, but it costs the operator extra
-records and signing work, and it is not secrecy: an enumerator can still count the
-records to learn the zone size and take the hashes offline for a dictionary attack. The
-real fix for secret names is to keep them out of public DNS.
+name to the next. NSEC3 hashing stops the straightforward online walk, but it adds
+hashing and validation work and operational complexity (not inherently many more denial
+records than NSEC), and it is not secrecy: an enumerator can still count the records to
+learn the zone size and take the hashes offline for a dictionary attack. The real fix
+for secret names is to keep them out of public DNS.
 
 # Phase 6: Last-Mile Response Forgery
 
@@ -480,7 +504,7 @@ configs and zone files, the routing scripts, the DNSSEC signing scripts, the C/l
 interceptor, the C/libpcap zone-walker, the Phase 7 PKI and DoT/DoH setup, and a first
 draft of this report.
 
-Prompts used (representative):
+Prompts used (the actual prompts that drove the build, lightly cleaned up):
 
 - "Build the Phase 1 hierarchy: three isolated Docker subnets joined by two no-NAT
   routers, BIND 9.20, root/com/example.com zones with glue, a recursive resolver."
@@ -501,5 +525,6 @@ against the brief's pass/fail criteria, with terminal output and `tshark` packet
 captures saved under each `phaseN/evidence/`. For example, Phase 3 was accepted only
 after `delv` reported "fully validated" and the re-run forgery produced SERVFAIL; Phase 4
 only after Run A gave a broken trust chain and Run B returned the rogue; Phase 5 only
-after the C walker recovered all names and then none under NSEC3; Phase 7 only after
+after the C walker recovered all eight non-apex names (the six hidden ones among them)
+and then none under NSEC3; Phase 7 only after
 the rogue-cert and tamper attempts failed and only the lax client was downgraded.
