@@ -394,29 +394,14 @@ that.
 
 # Appendix: Generative AI usage
 
-We used AI assistance (Claude Code) to build this. What it did and how we checked
-it:
+AI assistance (Claude Code) was used throughout. It wrote the Compose files, BIND
+configs and zones, the signing scripts, the C/libpcap interceptor, the zone walker,
+the Phase 7 PKI and DoT/DoH setup, and a first draft of this report.
 
-- **What it did:** scaffolded the repo; wrote the Compose files, BIND zone and
-  daemon configs, and the routing scripts; wrote the DNSSEC signing scripts (NSEC,
-  NSEC3, and the no-DS insecure-delegation option); wrote the C/libpcap interceptor
-  with its relay, forge, and strip modes; wrote the NSEC zone walker; wrote the
-  Phase 7 PKI, DoT/DoH config, and the three attack attempts; and drafted this
-  report from the captured output.
-- **Example prompts:** "build the Phase 1 base: compose, zones, routing"; "write the
-  DNSSEC signing scripts and a validating resolver"; "write a C/libpcap on-path
-  interceptor with a selective A-record forge"; "add a strip mode that downgrades a
-  signed answer, and a signer option that omits the DS"; "walk an NSEC zone with dig
-  only, then fix it with NSEC3"; "stand up the Phase 7 CA plus DoT/DoH and run the
-  three last-mile attacks against a strict and a lax client".
-- **How we verified it:** we did not take any of it on trust. Every phase was
-  deployed on Docker and checked against the brief's own success criteria. Phase 1:
-  resolution, fetch, isolation, and a referral capture. Phase 2: relay transparent,
-  then forge sends example.com to the rogue while www is untouched. Phase 3: the AD
-  flag and `delv` "fully validated", then the re-run attack giving SERVFAIL. Phase 4:
-  Run A gives SERVFAIL ("insecurity proof failed"), Run B returns the rogue once the
-  DS is removed. Phase 5: the walk recovers all nine names, and recovers none after
-  the NSEC3 re-sign. Phase 6: Client A lands on the rogue, Client B's `delv` rejects
-  the forgery. Phase 7: DoT and DoH resolve, the rogue cert and in-transit tamper
-  both fail, and only the lax client is downgraded when the transport is blocked. All
-  commands are in each phase's `scripts/`.
+Typical prompts were plain descriptions of each phase, for example "build the Phase 1
+hierarchy", "write a C/libpcap on-path forge", "add a strip mode and a no-DS signer
+option", and "set up DoT/DoH and the three last-mile attacks".
+
+Nothing was taken on trust. Every phase was deployed on Docker and checked against the
+brief's own pass/fail criteria before being written up, and all the commands are in
+each phase's `scripts/`.
