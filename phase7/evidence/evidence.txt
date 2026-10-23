@@ -1,0 +1,34 @@
+### Phase 7 evidence
+
+## 7.2 verify: DoT (853) and DoH (443) resolve over TLS
+;; TLS session (TLS1.3)-(ECDHE-X25519)-(RSA-PSS-RSAE-SHA256)-(AES-256-GCM)
+;; ->>HEADER<<- opcode: QUERY; status: NOERROR; id: 18377
+;; HTTP session (HTTP/2-POST)-(resolver.cs6008.local/dns-query)-(status: 200)
+;; From 172.16.2.10@443(HTTPS) in 1.7 ms
+
+## capture on edge-router during a DoT lookup: TLS 1.3 on 853, zero cleartext DNS on 53
+  TLS records on 853 : 8
+  TLS version seen   : 0x0303
+  cleartext DNS :53  : 0
+
+## 7.3 attack outcomes (3 attempts x 2 client policies)
+   strict client (DoT) example.com -> 172.16.1.20
+   lax client    (DoT) example.com -> 172.16.1.20
+   readable "example.com" strings in the 853 capture = 0
+RESULT: both clients got the real 172.16.1.20; the payload on 853 is ciphertext. Tamper fails x2.
+-- strict client (DoT, validates cert) --
+;; WARNING: TLS, handshake failed (Error in the certificate.)
+-- lax client (DoT, validates cert; cert error is not a transport failure) --
+;; WARNING: TLS, handshake failed (Error in the certificate.)
+RESULT: the rogue cert is not signed by the trusted CA, both clients abort. Impersonation fails x2.
+-- strict client (no cleartext fallback) --
+;; WARNING: connection timeout for 172.16.2.10@853(TLS)
+-- lax client (permits cleartext when the encrypted transport is down) --
+[lax] DoT transport unavailable -> falling back to cleartext :53
+example.com.        	3600	IN	A	172.16.1.30
+   lax client fetch -> HACKED
+RESULT: strict fails closed; lax is downgraded to :53 and poisoned to 172.16.1.30.
+ (i)  alter answer in transit    | no  (TLS integrity)        | no  (TLS integrity)
+ (ii) rogue-cert impersonation   | no  (cert not trusted)     | no  (cert not trusted)
+ (iii) block transport, downgrade| no, fails closed (DoS)     | YES, forged to rogue
+Only (iii) against the lax client lands, and only because that client accepts a

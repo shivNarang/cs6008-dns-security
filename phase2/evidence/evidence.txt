@@ -1,0 +1,15 @@
+### Phase 2 evidence
+
+## relay (forging off) vs forge (terminal)
+relay: example.com      -> 172.16.1.20
+forge: example.com      -> 172.16.1.30
+forge: www.example.com  -> 172.16.1.20
+forge: curl example.com -> <h1>:: HACKED ::</h1>
+
+## the forgery on the wire: same txid/QNAME, A rewritten 172.16.1.20 -> 172.16.1.30
+domain-ns SENT    : 172.16.3.30 -> 172.16.2.10  resp 0x8d38  example.com A 172.16.1.20
+resolver RECEIVED : 172.16.3.30 -> 172.16.2.10  resp 0x8d38  example.com A 172.16.1.30
+
+## what the resolver cached (poisoned A with a TTL that decays on re-query)
+first dig TTL : 3599
+after 3s TTL  : 3596

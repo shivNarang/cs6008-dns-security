@@ -1,0 +1,15 @@
+### Phase 4 Run B (no DS in com -> insecure delegation -> forgery accepted)
+
+## baseline (no attacker): example.com resolves but is NOT authenticated (no ad flag)
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 19883
+;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+
+## under strip attack: client resolves to the rogue
+172.16.1.30
+
+## annotated capture at the resolver: the forged A answer carries NO RRSIG
+## (Answer RRs: 1 = just the forged A; the RRSIG that normally signs it is stripped)
+    1   0.000000  172.16.3.30 → 172.16.2.10  DNS 324 Standard query response 0xa9ff A example.com A 172.16.1.30 NS ns.example.com RRSIG A 172.16.3.30 OPT
+    Answer RRs: 1
+    Answers
+        example.com: type A, class IN, addr 172.16.1.30

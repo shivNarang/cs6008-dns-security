@@ -1,0 +1,16 @@
+### Phase 4 Run A (com publishes DS -> strip cannot downgrade -> SERVFAIL)
+
+## baseline, no attacker: example.com validates (ad flag)
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 44227
+;; flags: qr rd ra ad; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 1
+
+## normal com response for example.com/DS (no attacker): DS record present
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 20280
+;example.com.			IN	DS
+
+## under strip attack: SERVFAIL + broken trust chain (the DS was stripped on the wire)
+;; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 43733
+23-Oct-2026 16:36:01.997 broken trust chain resolving 'example.com/A/IN': 172.16.3.30#53
+
+## capture at resolver during the attack: the com DS response is reduced to question+OPT, DS gone
+    2   0.024403  172.16.3.20 → 172.16.2.10  DNS 110 Standard query response 0xa08f DS example.com OPT

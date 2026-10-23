@@ -1,0 +1,16 @@
+### Phase 3 evidence
+
+## verify: signed + validated (ad flag, RRSIG present, delv fully validated)
+;; flags: qr rd ra ad; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 1
+; EDNS: version: 0, flags: do; udp: 1232
+; fully validated
+example.com.		3600	IN	A	172.16.1.20
+
+## DNSSEC records are visible in cleartext on the wire (capture on core-router)
+   2  DS 
+  12 DNSKEY
+  21 RRSIG
+
+## attack (Phase 2 forgery re-run unchanged): forged answer rejected -> SERVFAIL
+;; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 15019
+23-Oct-2026 16:41:26.179 RRSIG failed to verify resolving 'example.com/A/IN': 172.16.3.30#53

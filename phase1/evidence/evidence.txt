@@ -1,0 +1,15 @@
+### Phase 1 evidence
+
+## resolution / fetch / isolation
+dig example.com      -> 172.16.1.20
+dig www.example.com  -> 172.16.1.20
+curl example.com     -> <h1>Welcome to example.com</h1>
+dig @172.16.3.10 direct to root -> no servers could be reached
+resolver route to auth subnet -> 172.16.3.10 via 172.16.2.3 dev eth0 src 172.16.2.10
+
+## annotated capture on core-router (deduped): the example.com referral chain
+## each line: who -> whom, response for QNAME, what it returns (referral NS+glue, or the A)
+172.16.3.10 → 172.16.2.10  DNS 136 Standard query response 0x0e4b NS com NS a.gtld-servers
+172.16.3.10 → 172.16.2.10  DNS 178 Standard query response 0x75c9 A a.gtld-servers A 172.16.3.20 NS a.root-servers A 172.16.3.10
+172.16.3.20 → 172.16.2.10  DNS 149 Standard query response 0x0614 A example.com NS ns.example.com A 172.16.3.30
+172.16.3.30 → 172.16.2.10  DNS 165 Standard query response 0xa8cc A example.com A 172.16.1.20 NS ns.example.com A 172.16.3.30

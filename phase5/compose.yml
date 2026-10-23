@@ -51,14 +51,16 @@ services:
     command: ["named","-g","-c","/etc/bind/named.conf"]
 
   walker:
-    <<: *node
+    build: ./walker
+    image: cs6008-dns-walker
     container_name: walker
     hostname: walker
+    cap_add: [NET_ADMIN, NET_RAW]          # NET_RAW for libpcap inject
     networks: { resolver_net: { ipv4_address: 172.16.2.100 } }
-    environment: { STATIC_ROUTES: "172.16.3.0/24 via 172.16.2.3" }
-    volumes:
-      - ./scripts/zonewalk.sh:/opt/zonewalk.sh:ro
-    command: ["sleep","infinity"]
+    environment:
+      STATIC_ROUTES: "172.16.3.0/24 via 172.16.2.3"
+      GATEWAY: "172.16.2.3"
+      SERVER: "172.16.3.30"
 
   core-router:
     <<: *node

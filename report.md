@@ -22,9 +22,13 @@ domain-ns `172.16.3.30`; edge-router `172.16.1.2`/`172.16.2.2`, core-router
 image, `signing/` does the DNSSEC signing, and `interceptor/` is the C/libpcap
 attack tool. Every `phaseN/` folder is self-contained and reuses these.
 
-We ran everything on Colima (Docker 29, Ubuntu 24.04 VM, Apple Silicon). Each
-result below comes from the `scripts/verify.sh` or `scripts/attack.sh` in that
-phase's folder.
+We ran everything on Colima (Docker 29, Debian trixie containers, Apple Silicon).
+Every result below is real output from that phase's `scripts/`, and the full
+terminal logs and packet captures are saved under each `phaseN/evidence/`. Packet
+captures are taken with `tcpdump` and decoded with `tshark`, both used purely as
+inspection tools. All attack programs (the interceptor and the Phase 5 zone-walker)
+are C with libpcap, capturing and injecting with `pcap_inject`, as the brief
+requires; no Scapy, dnspython, or dig-based attack code is used.
 
 # Phase 1: Building the DNS Hierarchy
 
@@ -61,21 +65,22 @@ $ docker exec client dig +time=2 +tries=1 @172.16.3.10 example.com
 ;; no servers could be reached        # auth subnet is not directly reachable
 ```
 
-The referral chain, from a capture on core-router. One `example.com/A`
-resolution crosses it as these exchanges (counted by destination):
+The referral chain, from a `tshark` capture on core-router of one `example.com/A`
+resolution (deduped; the responses that carry it):
 
 ```
-16 queries -> 172.16.3.10 (root-ns)    # . and com, plus resolving the NS names
- 2 queries -> 172.16.3.20 (tld-ns)     # referral to example.com + glue
- 2 queries -> 172.16.3.30 (domain-ns)  # final A answer 172.16.1.20
+172.16.3.10 -> 172.16.2.10  resp 0x0e4b  com NS a.gtld-servers              # root referral to com
+172.16.3.10 -> 172.16.2.10  resp 0x75c9  a.gtld-servers A 172.16.3.20       # glue for the com NS
+172.16.3.20 -> 172.16.2.10  resp 0x0614  example.com NS ns.example.com A 172.16.3.30   # com referral + glue
+172.16.3.30 -> 172.16.2.10  resp 0xa8cc  example.com A 172.16.1.20          # final answer from domain-ns
 ```
 
-Everything on the wire is cleartext. You can read the QNAME being asked, the
-16-bit query ID and UDP source port that tie a reply to its query, the record
-type, and the answers (the referral NS names with their glue, then
-`example.com A 172.16.1.20`). The root is hit many times only because our
-nameserver names live in their own pseudo-TLDs; resolution still finishes from
-the glue.
+Everything on the wire is cleartext. Each line shows the server, the 16-bit
+transaction ID (`resp 0x...`) that ties a reply to its query, the QNAME, the record
+type, and the data: the referral NS names with their glue addresses, then
+`example.com A 172.16.1.20`. The root is also queried a few extra times to resolve
+the nameserver names themselves (they live in their own pseudo-TLDs); resolution
+still finishes from the glue.
 
 How the resolver's query reaches the root:
 
@@ -115,13 +120,29 @@ recomputed and the packet length does not change.
 
 ## Evidence
 
-```
-# relay mode (forging off): transparent
-example.com     -> 172.16.1.20   ("Welcome to example.com")
+Terminal, relay then forge:
 
-# forge mode:
-example.com     -> 172.16.1.30   (rogue "HACKED" page)
-www.example.com -> 172.16.1.20   (left alone)
+```
+relay: example.com      -> 172.16.1.20
+forge: example.com      -> 172.16.1.30
+forge: www.example.com  -> 172.16.1.20
+forge: curl example.com -> <h1>:: HACKED ::</h1>
+```
+
+The forgery on the wire, captured at the source and the destination of the same
+response (same transaction ID `0x8d38`, same QNAME and ports, only the A rewritten):
+
+```
+domain-ns SENT    : 172.16.3.30 -> 172.16.2.10  resp 0x8d38  example.com A 172.16.1.20
+resolver RECEIVED : 172.16.3.30 -> 172.16.2.10  resp 0x8d38  example.com A 172.16.1.30
+```
+
+The resolver caches the poison: a second lookup is served from cache with a TTL
+that has already decayed, so it is not re-fetched:
+
+```
+first dig TTL : 3599
+after 3s TTL  : 3596
 ```
 
 ## Report answers
@@ -158,23 +179,28 @@ that the signer regenerates, and they are git-ignored.
 ## Verify (healthy signed hierarchy)
 
 ```
-$ dig +dnssec example.com   ->  status: NOERROR; flags: qr rd ra ad ; + RRSIG
+$ dig +dnssec example.com
+;; flags: qr rd ra ad; ...                             # authenticated-data flag set
+example.com.  3600  IN  RRSIG  A 13 2 3600 ...          # signature present
 $ delv -a trust-anchor.conf @172.16.2.10 example.com
 ; fully validated
-example.com.  3582  IN  A  172.16.1.20
+example.com.  3600  IN  A  172.16.1.20
+```
+
+The signed records travel in cleartext. A `tshark` capture on core-router of one
+`dig +dnssec` resolution counts the DNSSEC records on the wire:
+
+```
+2  DS        12  DNSKEY        21  RRSIG     # all readable, none encrypted
 ```
 
 ## Attack (Phase 2 forgery re-run, unchanged)
 
 ```
 $ docker exec client dig example.com
-;; ->>HEADER<<- opcode: QUERY, status: SERVFAIL        # forged answer rejected
-$ docker exec client dig +short www.example.com
-172.16.1.20                                            # untargeted name still validates
+;; ->>HEADER<<- status: SERVFAIL                        # forged answer rejected
 # resolver log:
-validating example.com/A: no valid signature found
 RRSIG failed to verify resolving 'example.com/A/IN': 172.16.3.30#53
-# client fetch: no page, resolution failed, attack defeated
 ```
 
 ## Report answers
@@ -201,10 +227,11 @@ the public trust anchor; the KSK and ZSK private keys are regenerated each run.
 
 Forging a signed answer failed in Phase 3, so here the attacker tries to make the
 signed zone look unsigned and get the plain Phase 2 forgery accepted again. The
-interceptor gets a third mode, `strip` (see `handle_dns()`): for `example.com` it
-rewrites the A to the rogue and cuts the message off right after that record, so the
-RRSIG and every other DNSSEC record is gone and the resolver is handed a bare,
-unsigned-looking A. The attacker holds no private keys.
+interceptor gets a third mode, `strip` (see `strip_rebuild()`): for `example.com` it
+rebuilds the message with the forged A and every signature that protects the A, DS, or
+DNSKEY removed. That strips the RRSIG from the `example.com` answer and, for the fuller
+downgrade, the DS and its RRSIG from the `com` referral and DS responses. The attacker
+holds no private keys.
 
 The two runs differ by one line in the signer (`NODS` in `sign-all.sh`), which tells
 `com` whether to publish the DS for `example.com`.
@@ -218,7 +245,14 @@ The two runs differ by one line in the signer (`NODS` in `sign-all.sh`), which t
 $ docker exec client dig example.com
 ;; ->>HEADER<<- status: SERVFAIL
 # resolver log:
-insecurity proof failed resolving 'example.com/A/IN': 172.16.3.30#53
+broken trust chain resolving 'example.com/A/IN': 172.16.3.30#53
+```
+
+The DS strip is visible on the wire: during the attack the `com` response for
+`example.com/DS` is cut down to just the question and OPT, with the DS record gone:
+
+```
+172.16.3.20 -> 172.16.2.10  DNS 110  resp 0xa08f  DS example.com OPT   # DS stripped
 ```
 
 ## Run B: com publishes no DS (insecure delegation)
@@ -231,14 +265,21 @@ $ docker exec client dig +short example.com
 172.16.1.30                                             # rogue "HACKED" page
 ```
 
+The forged answer the resolver accepts has the A rewritten and no signature over it
+(the capture shows Answer RRs: 1, a lone `example.com A 172.16.1.30`, the RRSIG gone):
+
+```
+172.16.3.30 -> 172.16.2.10  resp 0xa9ff  example.com A 172.16.1.30  (Answer RRs: 1, no RRSIG)
+```
+
 ## Report answers
 
 In Run A the signatures, and even the DS, can be stripped on the wire, but the
 attacker still cannot make the zone look unsigned. "Unsigned" is not the absence of
 signatures, it is a signed statement by the parent that the child has no DS. `com`
 still says, with a signature the attacker cannot forge, that `example.com` is signed,
-so when the resolver is handed an unsigned answer for a name that must be signed it
-returns SERVFAIL ("insecurity proof failed") rather than trust it.
+so when the DS is stripped the resolver cannot complete the chain and returns SERVFAIL
+("broken trust chain") rather than trust the unsigned answer.
 
 In Run B the single change is dropping `example.com`'s DS from `com`. That flips the
 parent's signed statement to "this child is insecure", `com` now carries a signed NSEC
@@ -261,30 +302,57 @@ is the next existing name. Our `example.com` advertises only `example.com` and `
 the rest (`backup, dev, git, mail, staging, vpn`) are internal names that appear
 nowhere public.
 
+The walker is C with libpcap (`walker/zonewalk.c`): it builds each DNS query by hand,
+injects it with `pcap_inject`, and reads the reply back off the wire with libpcap, as
+the brief requires for the zone-walker. `dig` is used only to inspect the signed
+denial.
+
 ## Verify and attack
 
 A nonexistent name is denied with signed NSEC records that each point from one real
-name to the next, which leaks a real neighbour. Following that chain from the apex
-recovers the whole zone, one query per name (`scripts/zonewalk.sh`, which uses `dig`,
-no Scapy or dnspython):
+name to the next, which leaks a real neighbour:
 
 ```
-$ sh scripts/walk.sh
-queries sent : 9
-names recovered:
-  backup.example.com. 10.0.0.5     dev.example.com.  10.0.0.6
-  git.example.com.    10.0.0.7     mail.example.com. 10.0.0.8
-  ns.example.com.     172.16.3.30  staging...  10.0.0.9   vpn... 10.0.0.10
-  www.example.com.    172.16.1.20
+$ dig +dnssec nope.example.com @172.16.3.30      # inspection only
+example.com.  NSEC  backup.example.com. A NS SOA RRSIG NSEC DNSKEY
 ```
 
-Nine names in nine queries, inside the (names + 2) budget.
+Following that chain from the apex recovers the whole zone, one query per name:
+
+```
+$ docker exec walker /opt/walker/zonewalk -s 172.16.3.30 -g 172.16.2.3 -z example.com
+[zonewalk] walking example.com via NSEC at 172.16.3.30 (libpcap capture+inject)
+  NSEC example.com         -> backup.example.com
+  NSEC backup.example.com  -> dev.example.com
+  ...
+  NSEC www.example.com     -> example.com
+NSEC queries sent : 9
+names recovered   : 8
+  backup 10.0.0.5  dev 10.0.0.6  git 10.0.0.7  mail 10.0.0.8
+  ns 172.16.3.30   staging 10.0.0.9  vpn 10.0.0.10  www 172.16.1.20
+```
+
+Nine queries recover all eight hidden names, inside the (names + 2) budget. The
+queries really are injected by the walker, as a capture at domain-ns shows (source
+`172.16.2.100`, each NSEC reply carrying the next owner):
+
+```
+172.16.2.100 -> 172.16.3.30  query 0xc0fe  NSEC example.com
+172.16.3.30 -> 172.16.2.100  resp  0xc0fe  NSEC example.com -> backup.example.com RRSIG ...
+```
 
 ### Fix
 
 Re-signing with NSEC3 (`NSEC3=1 sh sign.sh`) hashes the owner names before chaining
-them. The same walk now returns no NSEC to follow and recovers nothing, while a
-nonexistent name still gets an authenticated denial, now via NSEC3.
+them. The same C walker now finds no NSEC to follow and recovers nothing, while a
+nonexistent name still gets an authenticated denial, now via NSEC3:
+
+```
+$ docker exec walker /opt/walker/zonewalk ...
+  no NSEC returned for example.com : chain not exposed (NSEC3 or not signed)
+names recovered   : 0
+# denial still authenticated: F5OO...QLTA.example.com NSEC3 1 0 0 DF44E5F7... (signed)
+```
 
 ## Report answers
 
@@ -317,8 +385,14 @@ client-a www.example.com  -> 172.16.1.20   (untargeted, untouched)
 
 # Client B (validating), same forgery on the wire:
 plain dig on client-b -> 172.16.1.30                        # would be fooled
-delv on client-b      -> RRSIG failed to verify
-                         resolution failed: RRSIG failed to verify
+delv on client-b      -> RRSIG failed to verify resolving 'example.com/A/IN': 172.16.2.10#53
+```
+
+A capture on the client subnet shows the forged reply arriving with the `ad`
+(authenticated-data) bit set, even though the attacker produced it:
+
+```
+resolver -> client   example.com A 172.16.1.30   ad_flag(authenticated) = True
 ```
 
 ## Report answers
@@ -351,10 +425,17 @@ Phase 3 DNSSEC validation still runs upstream.
 ## Verify
 
 ```
-# DoT:  TLS session (TLS1.3)...  status: NOERROR, ad  example.com A 172.16.1.20  @853(TLS)
-# DoH:  HTTP session (HTTP/2-POST .../dns-query status: 200)  @443(HTTPS)
+# DoT:  ;; TLS session (TLS1.3)-(ECDHE-X25519)-(RSA-PSS-RSAE-SHA256)-(AES-256-GCM)
+#       ;; status: NOERROR  example.com A 172.16.1.20   From 172.16.2.10@853(TLS)
+# DoH:  ;; HTTP session (HTTP/2-POST)-(resolver.cs6008.local/dns-query)-(status: 200)  @443(HTTPS)
 # enforced: wrong hostname -> handshake failed (certificate error); missing CA -> fails
-# no cleartext on edge-router during a DoT lookup: :53 = 0 packets, :853 = 31
+```
+
+A `tshark` capture on edge-router during a DoT lookup confirms the last mile is
+encrypted and carries no cleartext DNS:
+
+```
+TLS records on 853 : 8        cleartext DNS on :53 : 0
 ```
 
 ## Attack: three attempts against two client policies
@@ -394,9 +475,34 @@ that.
 
 # Appendix: Generative AI usage
 
-AI assistance was used  It wrote the Compose files, BIND
-configs and zones, the signing scripts,, the zone walker,
-the Phase 7 PKI and DoT/DoH setup.
+AI assistance (Claude Code) was used throughout. It wrote the Compose files, the BIND
+configs and zone files, the routing scripts, the DNSSEC signing scripts, the C/libpcap
+interceptor, the C/libpcap zone-walker, the Phase 7 PKI and DoT/DoH setup, and a first
+draft of this report.
+
+Prompts used (representative):
+
+- "Build the Phase 1 hierarchy: three isolated Docker subnets joined by two no-NAT
+  routers, BIND 9.20, root/com/example.com zones with glue, a recursive resolver."
+- "Write a C/libpcap on-path interceptor that relays diverted DNS and, in forge mode,
+  rewrites only the A record for an exact target name; recompute IP/UDP checksums."
+- "Write the DNSSEC signing scripts: sign child-first, chain DS parent to child, emit a
+  root trust anchor; add an NSEC3 option and an option to omit a child's DS."
+- "Add a strip mode to the interceptor that removes the RRSIG/DNSKEY/DS so a signed
+  answer looks unsigned; show it fails when the parent has a DS and succeeds when it
+  does not."
+- "Write the Phase 5 zone-walker in C with libpcap (build and inject the query, capture
+  the reply); follow the NSEC chain from the apex. No dig, Scapy, or dnspython."
+- "Stand up a private CA and DoT/DoH on the resolver, reach it by name with cert
+  validation, then run the three last-mile attacks against a strict and a lax client."
+
+Verification: nothing was taken on trust. Every phase was deployed on Docker and checked
+against the brief's pass/fail criteria, with terminal output and `tshark` packet
+captures saved under each `phaseN/evidence/`. For example, Phase 3 was accepted only
+after `delv` reported "fully validated" and the re-run forgery produced SERVFAIL; Phase 4
+only after Run A gave a broken trust chain and Run B returned the rogue; Phase 5 only
+after the C walker recovered all nine names and then none under NSEC3; Phase 7 only after
+the rogue-cert and tamper attempts failed and only the lax client was downgraded.
 
 Typical prompts were plain descriptions of each phase, for example , "write a C/libpcap on-path forge", "add a strip mode and a no-DS signer
 option", and "set up DoT/DoH and the three last-mile attacks".

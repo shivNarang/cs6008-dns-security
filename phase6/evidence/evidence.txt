@@ -1,0 +1,13 @@
+### Phase 6 evidence
+
+## Client A (plain stub): forged, lands on rogue; www untouched
+client-a example.com     -> 172.16.1.30
+client-a www.example.com -> 172.16.1.20
+client-a curl            -> <h1>:: HACKED ::</h1>
+
+## capture on the client subnet: forged A=172.16.1.30 arrives with the ad flag SET on the wire
+  resolver->client  example.com A 172.16.1.30  ad_flag(authenticated)=True
+
+## Client B (validating with delv + own root anchor): same forgery, rejected
+client-b plain dig (fooled)      -> 172.16.1.30
+client-b delv (validates) -> ;; RRSIG failed to verify resolving 'example.com/A/IN': 172.16.2.10#53
