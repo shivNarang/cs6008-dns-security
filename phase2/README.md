@@ -27,7 +27,7 @@ core-router only), `scripts/flush.sh` (resolver cache).
 - relay: `example.com` -> 172.16.1.20, real "Welcome" page.
 - forge: `example.com` -> 172.16.1.30, rogue "HACKED" page; `www.example.com` -> 172.16.1.20.
 
-## Report (2.4): to write
+## Report answers (2.4)
 Why it works (plain DNS has no origin authentication; the on-path attacker *sees*
 the query so it needs no QID/port guessing, unlike an off-path spoofer), plus the
 annotated capture of interception+injection. See the shared interceptor source.

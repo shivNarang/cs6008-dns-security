@@ -69,9 +69,10 @@ still gets an authenticated denial, now via NSEC3.
 ## Report answers
 
 **Names recovered and how.** The six internal names above plus `ns` and `www`,
-recovered by following the NSEC chain with `scripts/zonewalk.sh`: `dig NSEC` on the
-apex returns `backup` as the next name, `dig NSEC backup` returns `dev`, and so on
-through `git, mail, ns, staging, vpn, www` back to the apex.
+recovered by following the NSEC chain with the C/libpcap walker (`walker/zonewalk.c`):
+it injects raw NSEC queries with `pcap_inject` and captures responses with libpcap.
+An NSEC query on the apex returns `backup` as the next name, querying `backup` returns `dev`,
+and so on through `git, mail, ns, staging, vpn, www` back to the apex.
 
 **What made the walk possible, and why signed denial leaks when plain DNS does not.**
 NSEC made it possible. Plain DNS answers a nonexistent name with an unsigned NXDOMAIN
@@ -99,8 +100,8 @@ sh scripts/verify.sh                    # 5.2 signed NXDOMAIN reveals neighbours
 sh scripts/walk.sh                      # 5.3 recover every name
 sh scripts/fix.sh                       # re-sign NSEC3, walk recovers nothing
 
-# the walk, run by hand inside the attacker node:
-docker exec walker sh /opt/zonewalk.sh 172.16.3.30 example.com
+# the walk, run by hand inside the walker node:
+docker exec walker /opt/walker/zonewalk -i eth0 -s 172.16.3.30 -g 172.16.2.3 -S 172.16.2.100 -z example.com
 ```
 
-Walker source: `scripts/zonewalk.sh` (uses `dig`; no Scapy/dnspython).
+Walker source: `walker/zonewalk.c` (written in C with libpcap: injects raw queries and captures replies; no Scapy/dnspython/dig).

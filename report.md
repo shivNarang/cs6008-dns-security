@@ -501,5 +501,5 @@ against the brief's pass/fail criteria, with terminal output and `tshark` packet
 captures saved under each `phaseN/evidence/`. For example, Phase 3 was accepted only
 after `delv` reported "fully validated" and the re-run forgery produced SERVFAIL; Phase 4
 only after Run A gave a broken trust chain and Run B returned the rogue; Phase 5 only
-after the C walker recovered all nine names and then none under NSEC3; Phase 7 only after
+after the C walker recovered all names and then none under NSEC3; Phase 7 only after
 the rogue-cert and tamper attempts failed and only the lax client was downgraded.
