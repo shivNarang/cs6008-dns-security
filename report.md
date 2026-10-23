@@ -503,10 +503,3 @@ after `delv` reported "fully validated" and the re-run forgery produced SERVFAIL
 only after Run A gave a broken trust chain and Run B returned the rogue; Phase 5 only
 after the C walker recovered all nine names and then none under NSEC3; Phase 7 only after
 the rogue-cert and tamper attempts failed and only the lax client was downgraded.
-
-Typical prompts were plain descriptions of each phase, for example , "write a C/libpcap on-path forge", "add a strip mode and a no-DS signer
-option", and "set up DoT/DoH and the three last-mile attacks".
-
-Nothing was taken on trust. Every phase was deployed on Docker and checked against the
-brief's own pass/fail criteria before being written up, and all the commands are in
-each phase's `scripts/`.
