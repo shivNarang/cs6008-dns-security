@@ -44,3 +44,19 @@ README.
 - Same DNSSEC signing algorithm across phases 3 to 6 so the chain stays consistent.
 - No private keys in the repo.
 - Deadline: **23 October 2026**. If AI was used, list prompts + verification in a report appendix.
+
+## Packaging for submission
+
+The brief requires submitting one Git repository archived as a single `.zip` or `.tar.gz` (keeping the `.git` history inside), with no generated artifacts or private keys included:
+
+```sh
+# 1. Ensure report.pdf is built
+sh make-report.sh
+
+# 2. Clean any generated artifacts (signed zones, keys, certificates)
+git clean -fdX
+
+# 3. Create the submission archive (preserves .git history)
+tar -czf ../CS6008_AS2_submission.tar.gz .
+# or: zip -r ../CS6008_AS2_submission.zip .
+```
