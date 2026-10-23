@@ -169,10 +169,10 @@ why it still returns `172.16.1.20`.
 
 ## Design choices
 
-We sign with ECDSAP256SHA256 (algorithm 13). The keys and signatures are small
-and validation is fast, and it is the modern default. The trade-off is a shorter
-track record than RSA and slightly less universal support than it is new (Ed25519
-is even newer), but it keeps the signed zones compact and is widely supported.
+We sign with ECDSAP256SHA256 (algorithm 13). ECDSA P-256 produces compact keys and
+signatures and is widely supported, and validation is fast. Compared with RSA it may
+have less extensive legacy compatibility; Ed25519 is a newer alternative. The compact
+signatures keep the signed zones small, which suits this lab.
 
 The chain is built child first (`common/signing/sign-all.sh`): sign
 `example.com`, put its KSK's DS into `com`, sign `com`, put its DS into the root,
@@ -215,6 +215,18 @@ $ docker exec client curl -v http://example.com
 * Could not resolve host: example.com
 curl: (6) Could not resolve host: example.com
 ```
+
+A `tshark` capture on the resolver shows why validation fails. The attacker rewrote the
+A to `172.16.1.30` but left the original RRSIG in place (it has no key to re-sign), so
+the signature no longer matches the answer it covers:
+
+```
+172.16.3.30 -> 172.16.2.10  resp 0x24f3  example.com A 172.16.1.30  + RRSIG A (now stale)
+```
+
+The RRSIG is right there on the wire next to the forged A; the resolver checks it against
+the A RRset, finds no match, and returns SERVFAIL. In Phase 2 the identical packet was
+accepted because nothing checked the signature.
 
 So the forgery does not poison the client; it denies it. The resolver returns
 SERVFAIL rather than an address, so `curl` cannot resolve the name and no page is
