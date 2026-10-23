@@ -221,7 +221,7 @@ A to `172.16.1.30` but left the original RRSIG in place (it has no key to re-sig
 the signature no longer matches the answer it covers:
 
 ```
-172.16.3.30 -> 172.16.2.10  resp 0x24f3  example.com A 172.16.1.30  + RRSIG A (now stale)
+172.16.3.30 -> 172.16.2.10  resp 0x24f3  example.com A 172.16.1.30  + RRSIG A (invalid for the modified A RRset)
 ```
 
 The RRSIG is right there on the wire next to the forged A; the resolver checks it against
