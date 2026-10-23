@@ -69,10 +69,10 @@ The referral chain, from a `tshark` capture on core-router of one `example.com/A
 resolution (deduped; the responses that carry it):
 
 ```
-172.16.3.10 -> 172.16.2.10  resp 0x0e4b  com NS a.gtld-servers              # root referral to com
-172.16.3.10 -> 172.16.2.10  resp 0x75c9  a.gtld-servers A 172.16.3.20       # glue for the com NS
-172.16.3.20 -> 172.16.2.10  resp 0x0614  example.com NS ns.example.com A 172.16.3.30   # com referral + glue
-172.16.3.30 -> 172.16.2.10  resp 0xa8cc  example.com A 172.16.1.20          # final answer from domain-ns
+172.16.3.10 -> 172.16.2.10  resp 0x0e4b  com NS a.gtld-servers             # root: referral to com
+172.16.3.10 -> 172.16.2.10  resp 0x75c9  a.gtld-servers A 172.16.3.20      # root: glue for com NS
+172.16.3.20 -> 172.16.2.10  resp 0x0614  example.com NS ns.example.com A 172.16.3.30   # com: referral
+172.16.3.30 -> 172.16.2.10  resp 0xa8cc  example.com A 172.16.1.20         # domain-ns: final answer
 ```
 
 Everything on the wire is cleartext. Each line shows the server, the 16-bit
@@ -341,20 +341,22 @@ denial.
 ## Verify and attack
 
 A nonexistent name is denied with signed NSEC records that each point from one real
-name to the next, which leaks a real neighbour. The full authority section for
-`nope.example.com` carries two NSEC records, which together are the complete proof:
+name to the next, which leaks a real neighbour. The authority section for
+`nope.example.com` carries two NSEC records, each followed by the RRSIG that signs it:
 
 ```
 $ docker exec resolver dig +dnssec +norec nope.example.com @172.16.3.30
-# authority section (inspection only):
-mail.example.com.  3600  IN  NSEC  ns.example.com.      A RRSIG NSEC
-example.com.       3600  IN  NSEC  backup.example.com.  A NS SOA RRSIG NSEC DNSKEY
+mail.example.com.  NSEC   ns.example.com.      A RRSIG NSEC
+mail.example.com.  RRSIG  NSEC 13 3 3600 20261122... 20261023... example.com. <sig>
+example.com.       NSEC   backup.example.com.  A NS SOA RRSIG NSEC DNSKEY
+example.com.       RRSIG  NSEC 13 2 3600 20261122... 20261023... example.com. <sig>
 ```
 
-The first NSEC (`mail -> ns`) proves `nope` does not exist, because `nope` sorts
-between `mail` and `ns`; the apex NSEC proves there is no `*.example.com` wildcard that
-could have synthesised an answer. Together they are the complete denial, and both leak
-a real neighbour, which is exactly what the walk exploits.
+Each NSEC is covered by a real `RRSIG NSEC`, so the denial is authenticated. The first
+NSEC (`mail -> ns`) proves `nope` does not exist, because `nope` sorts between `mail`
+and `ns`; the apex NSEC proves there is no `*.example.com` wildcard that could have
+synthesised an answer. Together they are the complete, signed denial, and both leak a
+real neighbour, which is exactly what the walk exploits.
 
 Following that chain from the apex recovers the whole zone, one query per name:
 
@@ -559,10 +561,7 @@ Prompts used (the actual prompts that drove the build, lightly cleaned up):
   validation, then run the three last-mile attacks against a strict and a lax client."
 
 Verification: nothing was taken on trust. Every phase was deployed on Docker and checked
-against the brief's pass/fail criteria, with terminal output and `tshark` packet
-captures saved under each `phaseN/evidence/`. For example, Phase 3 was accepted only
-after `delv` reported "fully validated" and the re-run forgery produced SERVFAIL; Phase 4
-only after Run A gave a broken trust chain and Run B returned the rogue; Phase 5 only
-after the C walker recovered all eight non-apex names (the six hidden ones among them)
-and then none under NSEC3; Phase 7 only after
-the rogue-cert and tamper attempts failed and only the lax client was downgraded.
+against the brief's pass/fail criteria, with terminal output and `tshark` captures saved
+under each `phaseN/evidence/` (for example Phase 3's `delv` "fully validated" then
+SERVFAIL, Phase 4's broken-chain versus rogue outcomes, Phase 5's full recovery then none
+under NSEC3, and Phase 7's six attack results).

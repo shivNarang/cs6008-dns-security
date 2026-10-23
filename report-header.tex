@@ -1,0 +1,15 @@
+% Wrap long code lines instead of overflowing the right margin, in a slightly
+% smaller font. Used by make-report.sh with pandoc --listings.
+\lstset{
+  breaklines=true,
+  breakatwhitespace=false,
+  basicstyle=\small\ttfamily,
+  columns=fullflexible,
+  keepspaces=true,
+  postbreak=\mbox{\textcolor{gray}{$\hookrightarrow$}\space},
+  frame=none,
+  aboveskip=0.5em,
+  belowskip=0.5em
+}
+\setlength{\emergencystretch}{3em}
+\setlength{\parskip}{4pt plus 1pt}
