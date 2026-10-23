@@ -347,9 +347,9 @@ name to the next, which leaks a real neighbour. The authority section for
 ```
 $ docker exec resolver dig +dnssec +norec nope.example.com @172.16.3.30
 mail.example.com.  NSEC   ns.example.com.      A RRSIG NSEC
-mail.example.com.  RRSIG  NSEC 13 3 3600 20261122... 20261023... example.com. <sig>
+mail.example.com.  RRSIG  NSEC 13 3 3600 20261122163900 20261023163900 27726 example.com. <sig>
 example.com.       NSEC   backup.example.com.  A NS SOA RRSIG NSEC DNSKEY
-example.com.       RRSIG  NSEC 13 2 3600 20261122... 20261023... example.com. <sig>
+example.com.       RRSIG  NSEC 13 2 3600 20261122163900 20261023163900 27726 example.com. <sig>
 ```
 
 Each NSEC is covered by a real `RRSIG NSEC`, so the denial is authenticated. The first
